@@ -1,0 +1,19 @@
+{
+  "id": "video-archive",
+  "preset": "video-archive",
+  "name": "Video Archive",
+  "description": "Large video files. Few parallel streams so drives stay sequential.",
+  "destinationKind": "local",
+  "destinationRoot": "",
+  "mode": "safe-mirror",
+  "verification": "metadata",
+  "preserveMacMetadata": true,
+  "parallelCopies": 2,
+  "filters": [
+    { "id": "render", "pattern": "**/Render Files/**", "action": "exclude", "note": "Render files can be regenerated." },
+    { "id": "proxy", "pattern": "**/Proxy Media/**", "action": "exclude", "note": "Proxy media can be regenerated." },
+    { "id": "cache", "pattern": "**/CacheClip/**", "action": "exclude", "note": "Editor caches are not archival data." },
+    { "id": "temporary", "pattern": "*.tmp", "action": "exclude", "note": "Temporary files are excluded." }
+  ],
+  "sources": [{ "id": "video", "label": "Video folder", "path": "", "category": "video" }]
+}

@@ -1,0 +1,23 @@
+{
+  "id": "phone-camera-roll",
+  "preset": "phone-camera-roll",
+  "name": "Phone Camera Roll",
+  "description": "Backs up the photos, videos, screenshots and WhatsApp media of the connected Android phone to a drive.",
+  "destinationKind": "local",
+  "destinationRoot": "",
+  "mode": "safe-mirror",
+  "verification": "metadata",
+  "preserveMacMetadata": false,
+  "parallelCopies": 4,
+  "filters": [
+    { "id": "thumbnails", "pattern": "**/.thumbnails/**", "action": "exclude", "note": "Android thumbnail caches can be rebuilt." },
+    { "id": "trashed", "pattern": ".trashed-*", "action": "exclude", "note": "Files in the Android trash." },
+    { "id": "pending", "pattern": ".pending-*", "action": "exclude", "note": "Files the camera is still writing." },
+    { "id": "sent", "pattern": "**/Sent/**", "action": "exclude", "note": "WhatsApp media you sent yourself is already in the camera roll." }
+  ],
+  "sources": [
+    { "id": "camera", "label": "Camera", "path": "DCIM/Camera", "category": "photos", "kind": "android", "deviceId": "" },
+    { "id": "screenshots", "label": "Screenshots", "path": "Pictures/Screenshots", "category": "photos", "kind": "android", "deviceId": "" },
+    { "id": "whatsapp", "label": "WhatsApp media", "path": "Android/media/com.whatsapp/WhatsApp/Media", "category": "photos", "kind": "android", "deviceId": "" }
+  ]
+}

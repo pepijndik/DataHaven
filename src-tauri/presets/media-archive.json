@@ -1,0 +1,16 @@
+{
+  "id": "media-archive",
+  "preset": "media-archive",
+  "name": "Photo Archive",
+  "description": "A full copy profile for photo folders such as a 2010 photo archive.",
+  "destinationKind": "local",
+  "destinationRoot": "",
+  "mode": "safe-mirror",
+  "verification": "metadata",
+  "preserveMacMetadata": true,
+  "parallelCopies": 6,
+  "filters": [
+    { "id": "temporary", "pattern": "*.tmp", "action": "exclude", "note": "Temporary files are excluded." }
+  ],
+  "sources": [{ "id": "archive", "label": "Archive folder", "path": "", "category": "photos" }]
+}

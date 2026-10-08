@@ -1,0 +1,61 @@
+{
+  "id": "lightroom-optimized",
+  "preset": "lightroom-optimized",
+  "name": "Lightroom Optimized",
+  "description": "A focused Lightroom profile. Choose the source and any destination drive yourself.",
+  "destinationKind": "local",
+  "destinationRoot": "",
+  "mode": "safe-mirror",
+  "verification": "important-hash",
+  "preserveMacMetadata": true,
+  "guards": [
+    "lightroom-closed"
+  ],
+  "importantPatterns": [
+    "*.lrcat",
+    "*.xmp",
+    "*.lrtemplate",
+    "*.lrsmcol"
+  ],
+  "parallelCopies": 4,
+  "filters": [
+    {
+      "id": "previews",
+      "pattern": "**/*Previews.lrdata/**",
+      "action": "exclude",
+      "note": "Standard and smart previews (\"<Catalog> Previews.lrdata\") can be rebuilt."
+    },
+    {
+      "id": "helper",
+      "pattern": "**/*Helper.lrdata/**",
+      "action": "exclude",
+      "note": "Lightroom helper cache can be rebuilt."
+    },
+    {
+      "id": "cache",
+      "pattern": "**/Cache/**",
+      "action": "exclude",
+      "note": "Application cache is not archival data."
+    },
+    {
+      "id": "lock",
+      "pattern": "*.lrcat.lock",
+      "action": "exclude",
+      "note": "Lock files only exist while Lightroom runs."
+    },
+    {
+      "id": "temporary",
+      "pattern": "*.tmp",
+      "action": "exclude",
+      "note": "Temporary files are excluded."
+    }
+  ],
+  "sources": [
+    {
+      "id": "lightroom",
+      "label": "Lightroom library",
+      "path": "",
+      "category": "catalog"
+    }
+  ]
+}
