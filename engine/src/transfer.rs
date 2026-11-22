@@ -3,8 +3,11 @@ use std::fs::{self, File, FileTimes};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 
-const CHUNK_SIZE: usize = 8 * 1024 * 1024;
+const CHUNK_SIZE: usize = 4 * 1024 * 1024;
+/// Buffers in flight per copied file: one being read, one being written, one spare.
+const PIPELINE_BUFFERS: usize = 3;
 /// Files up to this size use the OS copy (clonefile on APFS, copy_file_range on Linux) when nothing needs hashing.
 const NATIVE_COPY_LIMIT: u64 = 256 * 1024 * 1024;
 const RESUME_CHECK_BYTES: u64 = 1024 * 1024;
@@ -115,6 +118,8 @@ impl Transfer<'_> {
         Ok(CopiedFile { archived, size, modified_ns: crate::scan::system_time_ns(modified), hash })
     }
 
+    /// Reads and writes at the same time: a reader thread fills buffers while this thread writes
+    /// (and hashes) the previous one, so the source and the destination drive are both busy.
     fn copy_chunked(&self, source: &Path, partial: &Path, offset: u64, hash: bool) -> Result<Option<String>, CopyError> {
         let mut input = File::open(source)?;
         let mut hasher = hash.then(blake3::Hasher::new);
@@ -123,23 +128,54 @@ impl Transfer<'_> {
             hasher.update_reader((&mut input).take(offset))?;
         }
         input.seek(SeekFrom::Start(offset))?;
-        let mut output = File::options().create(true).write(true).append(offset > 0).truncate(offset == 0).open(partial)?;
+        let output = File::options().create(true).write(true).append(offset > 0).truncate(offset == 0).open(partial)?;
 
-        let mut buffer = vec![0_u8; CHUNK_SIZE];
-        loop {
+        let (filled_sender, filled) = mpsc::sync_channel::<io::Result<(Vec<u8>, usize)>>(PIPELINE_BUFFERS);
+        let (empty_sender, empty) = mpsc::sync_channel::<Vec<u8>>(PIPELINE_BUFFERS);
+        for _ in 0..PIPELINE_BUFFERS {
+            let _ = empty_sender.send(vec![0_u8; CHUNK_SIZE]);
+        }
+        std::thread::scope(|scope| {
+            scope.spawn(move || {
+                // Stops at the end of the file, on a read error, or when the writer hangs up.
+                while let Ok(mut buffer) = empty.recv() {
+                    let read = loop {
+                        match input.read(&mut buffer) {
+                            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                            other => break other,
+                        }
+                    };
+                    match read {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            if filled_sender.send(Ok((buffer, read))).is_err() {
+                                break;
+                            }
+                        }
+                        Err(error) => {
+                            let _ = filled_sender.send(Err(error));
+                            break;
+                        }
+                    }
+                }
+            });
+            self.write_chunks(output, filled, empty_sender, hasher)
+        })
+    }
+
+    /// The writing half of `copy_chunked`. Owns both channel ends it uses, so returning early
+    /// (cancel or error) hangs up and lets the reader thread finish.
+    fn write_chunks(&self, mut output: File, filled: Receiver<io::Result<(Vec<u8>, usize)>>, empty: SyncSender<Vec<u8>>, mut hasher: Option<blake3::Hasher>) -> Result<Option<String>, CopyError> {
+        for chunk in filled {
             if self.control.wait() {
                 output.flush()?;
                 return Err(CopyError::Cancelled);
             }
-            let read = match input.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(read) => read,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error.into()),
-            };
+            let (buffer, read) = chunk?;
             output.write_all(&buffer[..read])?;
             if let Some(hasher) = hasher.as_mut() { hasher.update(&buffer[..read]); }
             self.copied_bytes.fetch_add(read as u64, Ordering::Relaxed);
+            let _ = empty.send(buffer);
         }
         output.flush()?;
         Ok(hasher.map(|hasher| hasher.finalize().to_hex().to_string()))
@@ -255,6 +291,22 @@ mod tests {
             assert_eq!(copied.hash.is_some(), verify_hash);
         }
         assert!(!root.join("destination/video/clip.mov.lbpart").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pipelined_copy_of_a_file_spanning_several_buffers_is_exact_and_hashed() {
+        let root = temp_dir("pipeline");
+        let content: Vec<u8> = (0..(CHUNK_SIZE * PIPELINE_BUFFERS + 12_345)).map(|index| (index % 251) as u8).collect();
+        write_source(&root, &content, SystemTime::now() - Duration::from_secs(60));
+        let control = RunControl::new();
+        let bytes = AtomicU64::new(0);
+        let transfer = Transfer { control: &control, copied_bytes: &bytes, archive_root: None, destination_root: &root.join("destination"), preserve_metadata: false };
+
+        let copied = transfer.copy(&plan_entry(&root, PlanAction::Copy, true)).ok().expect("copy should succeed");
+        assert_eq!(fs::read(root.join("destination/video/clip.mov")).unwrap(), content);
+        assert_eq!(copied.hash.unwrap(), blake3::hash(&content).to_hex().to_string());
+        assert_eq!(bytes.load(Ordering::Relaxed), content.len() as u64);
         fs::remove_dir_all(root).unwrap();
     }
 

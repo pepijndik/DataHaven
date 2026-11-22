@@ -1,13 +1,33 @@
-# Lightroom Backup Station
+# DataHaven
 
-Lightroom Backup Station is a macOS and Linux Tauri desktop app for backing up Lightroom catalogs, original photos, and video archives to user configured drives and NAS destinations.
+DataHaven is a macOS and Linux desktop app for backing up Lightroom catalogs, original photos, and video archives to user configured drives and NAS destinations.
+
+## Download
+
+Get the newest build from the [Releases page](https://github.com/pepijndik/DataHaven/releases):
+
+1. **Mac:** open `DataHaven.dmg` and drag DataHaven to Applications. The app is not notarized yet, so the first time macOS blocks it. Try to open it once, then go to System Settings, Privacy & Security, and click "Open Anyway".
+2. **Linux:** unpack `DataHaven-linux-x86_64.tar.gz` and run `datahaven`.
+
+Every change on `main` refreshes the "Latest build" download. A tag such as `v0.2.0` publishes a named release.
+
+## How it works
+
+Three steps make a backup: choose what (photos, videos, a Lightroom library or a whole drive), choose the drive or folder it is on, and choose the backup drive. After that, one button backs it up, and only what changed is copied. A backup can also run by itself whenever its drive is plugged in.
+
+The app is written in Rust from top to bottom. It has two windows on one shared engine:
+
+1. **The native window** (`native/`, built with egui). No web view and no JavaScript, so it starts in a fraction of a second and stays light while a backup runs. This is the main app.
+2. **The Tauri window** (`src/` and `src-tauri/`, React in a web view). Kept as a fallback. It reads and writes the same jobs, backup history and phone settings, so you can switch between the two at any time.
+
+Both use the backup engine in `engine/`, which holds all scanning, copying, verification, phone and NAS code.
 
 ## What works now
 
-1. A React and Tauri desktop UI with configurable backup jobs that are saved between launches.
+1. A native Rust desktop window (and a React and Tauri fallback window) with configurable backup jobs that are saved between launches.
 2. A native Rust engine with a parallel scanner that skips excluded folders without entering them.
 3. A SQLite backup history (WAL, batched writes) so unchanged files are skipped without touching the destination.
-4. Resumable copies through `.lbpart` files that are flushed to disk before they replace the backup.
+4. Resumable copies through `.lbpart` files that are flushed to disk before they replace the backup. Large and hashed files are read and written at the same time, so the source and the backup drive are both kept busy.
 5. Safe mirror mode, which moves the previous destination file into `_Archive/<run>` before replacing it, with optional retention.
 6. BLAKE3 verification for important files or for every file.
 7. Lightroom catalog protection, plus presets for Lightroom, photo archives, and video archives.
@@ -26,7 +46,7 @@ On macOS the camera service (`ptpcamerad`) and Android File Transfer can hold th
 
 ## Presets
 
-Presets are JSON profile templates. The bundled ones live in `src-tauri/presets`. Drop extra `*.json` files into the app data folder under `presets` to add your own or override a bundled preset with the same `id`. Useful fields:
+Presets are JSON profile templates. The bundled ones live in `engine/presets`. Drop extra `*.json` files into the app data folder under `presets` to add your own or override a bundled preset with the same `id`. Useful fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -40,13 +60,35 @@ Presets are JSON profile templates. The bundled ones live in `src-tauri/presets`
 
 ## Commands
 
+Native window (needs only Rust):
+
+```bash
+cargo run --release      # start the native window
+npm run native:bundle    # macOS: build target/release/bundle/DataHaven.app (DMG=1 also makes a DMG)
+cargo test               # engine and native window tests
+```
+
+Tauri fallback window (needs Node as well):
+
 ```bash
 npm install
 npm run tauri:dev
 npm run tauri:build
-npm run test
 npm run typecheck
 ```
+
+Release builds use link time optimisation, and debug builds compile the dependencies (hashing, SQLite) with optimisations, so test runs are fast as well.
+
+## Sharing a test build
+
+Run `npm run tauri:build:share`. This builds a universal DMG of the Tauri window (Apple Silicon and Intel) at `target/universal-apple-darwin/release/bundle/dmg/`. The app is ad hoc signed but not notarized, so macOS blocks the first launch for the tester.
+
+The tester opens the DMG, drags the app to Applications, and then does one of the following:
+
+1. Try to open the app once, then go to System Settings, Privacy & Security, and click "Open Anyway".
+2. Or run `xattr -dr com.apple.quarantine /Applications/lightroom-backup-station.app` in Terminal.
+
+To skip this step, sign with a Developer ID certificate and notarize (set `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID` before building).
 
 ## Fast QNAP path
 

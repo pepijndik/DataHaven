@@ -121,7 +121,7 @@ pub fn detect() -> Result<Vec<AndroidDevice>, String> {
 pub fn watch(on_change: impl Fn(Vec<AndroidDevice>) + Send + Sync + 'static) {
     match mtp_rs::mtp::watch_devices() {
         Ok(mut watch) => {
-            tauri::async_runtime::spawn(async move {
+            crate::runtime::spawn(async move {
                 while watch.next().await.is_some() {
                     on_change(detect().unwrap_or_default());
                 }

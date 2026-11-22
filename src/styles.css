@@ -29,7 +29,7 @@ code { font-family: "SFMono-Regular", Consolas, monospace; word-break: break-wor
 .appShell { min-height: 100vh; display: grid; grid-template-columns: 248px minmax(0, 1fr); }
 .sidebar { position: sticky; top: 0; height: 100vh; padding: 30px 20px 22px; display: flex; flex-direction: column; background: #202d27; color: #f4f2ea; }
 .brandBlock { display: flex; align-items: center; gap: 12px; }
-.brandMark { width: 37px; height: 37px; display: grid; place-items: center; background: #e9b65c; color: #202d27; border-radius: 11px 11px 11px 3px; transform: rotate(-4deg); }
+.brandMark { width: 40px; height: 40px; flex: 0 0 auto; display: block; filter: drop-shadow(0 4px 10px rgba(0,0,0,.35)); }
 .brandKicker, .eyebrow { margin: 0 0 6px; font-size: 10px; text-transform: uppercase; letter-spacing: .16em; font-weight: 800; }
 .brandKicker { color: #a9c7a9; }
 h1, h2, h3, p { margin-top: 0; }

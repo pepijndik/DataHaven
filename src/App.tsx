@@ -43,6 +43,7 @@ import type {
 } from "../shared/types";
 import { errorText, formatBytes, getApi, titleCase } from "./helpers";
 import { JobEditor } from "./JobEditor";
+import appIcon from "./assets/app-icon.png";
 
 type View = "overview" | "settings";
 type Tone = "sun" | "leaf" | "sky" | "ink";
@@ -615,9 +616,7 @@ export default function App() {
     <main className="appShell">
       <aside className="sidebar">
         <div className="brandBlock">
-          <div className="brandMark">
-            <Sparkles size={21} />
-          </div>
+          <img className="brandMark" src={appIcon} alt="" width={40} height={40} />
           <div>
             <p className="brandKicker">Private archive</p>
             <h1>
