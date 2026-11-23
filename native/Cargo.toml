@@ -1,0 +1,25 @@
+[package]
+name = "backup-station"
+version = "0.1.0"
+description = "DataHaven: the native Rust (egui) backup app."
+edition = "2024"
+rust-version = "1.90"
+publish = false
+default-run = "backup-station"
+
+[[bin]]
+name = "backup-station"
+path = "src/main.rs"
+
+[dependencies]
+backup-engine = { path = "../engine" }
+eframe = { version = "0.37", default-features = false, features = ["default_fonts", "system_fonts", "glow", "wayland", "x11"] }
+egui_extras = { version = "0.37", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+rfd = "0.18"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+libc = "0.2"
+
+[dev-dependencies]
+egui_kittest = { version = "0.37", features = ["wgpu", "snapshot"] }

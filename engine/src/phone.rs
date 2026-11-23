@@ -29,7 +29,7 @@ pub fn uri(device_id: &str, folder: &str, relative: &str) -> String {
 }
 
 fn block<F: Future>(future: F) -> F::Output {
-    tauri::async_runtime::block_on(future)
+    crate::runtime::block_on(future)
 }
 
 pub struct PhoneFile {

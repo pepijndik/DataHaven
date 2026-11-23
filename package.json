@@ -5,14 +5,18 @@
   "type": "module",
   "description": "A macOS and Linux desktop app for fast, safe Lightroom, video, and NAS backups.",
   "scripts": {
+    "native": "cargo run --release -p backup-station",
+    "native:build": "cargo build --release -p backup-station",
+    "native:bundle": "sh scripts/bundle-native-macos.sh",
     "dev": "vite",
     "build:renderer": "tsc -p tsconfig.renderer.json --noEmit && vite build",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "build": "npm run build:renderer",
     "preview": "vite preview",
-    "test": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "typecheck": "tsc -b"
+    "test": "cargo test",
+    "typecheck": "tsc -b",
+    "tauri:build:share": "tauri build --target universal-apple-darwin --bundles dmg"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.1",

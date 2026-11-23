@@ -1,0 +1,97 @@
+name: Build DataHaven
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Tests
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test
+
+  macos:
+    name: macOS app
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Build for Apple Silicon and Intel
+        run: |
+          cargo build --release -p backup-station --target aarch64-apple-darwin
+          cargo build --release -p backup-station --target x86_64-apple-darwin
+          mkdir -p target/release
+          lipo -create -output target/release/backup-station \
+            target/aarch64-apple-darwin/release/backup-station \
+            target/x86_64-apple-darwin/release/backup-station
+      - name: Make DataHaven.app and DataHaven.dmg
+        run: SKIP_BUILD=1 DMG=1 sh scripts/bundle-native-macos.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DataHaven-macOS
+          path: target/release/bundle/DataHaven.dmg
+
+  linux:
+    name: Linux app
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: System libraries for the window
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libgl1-mesa-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libudev-dev
+      - run: cargo build --release -p backup-station
+      - name: Package
+        run: |
+          mkdir -p dist-linux/DataHaven
+          cp target/release/backup-station dist-linux/DataHaven/datahaven
+          cp src-tauri/icons/128x128@2x.png dist-linux/DataHaven/datahaven.png
+          tar -czf DataHaven-linux-x86_64.tar.gz -C dist-linux DataHaven
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DataHaven-linux
+          path: DataHaven-linux-x86_64.tar.gz
+
+  release:
+    name: Publish download
+    needs: [macos, linux]
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: downloads
+          merge-multiple: true
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            gh release create "${GITHUB_REF_NAME}" downloads/* --title "DataHaven ${GITHUB_REF_NAME}" --generate-notes
+          else
+            # Every change on main refreshes the "Latest build" download.
+            gh release delete latest --cleanup-tag --yes || true
+            gh release create latest downloads/* --prerelease --target "${GITHUB_SHA}" --title "Latest build" \
+              --notes "Built automatically from the newest code on main. Open DataHaven.dmg on a Mac, or unpack the Linux archive."
+          fi

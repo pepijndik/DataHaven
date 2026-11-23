@@ -1,0 +1,25 @@
+[package]
+name = "backup-engine"
+version = "0.1.0"
+description = "The backup engine shared by the native and the Tauri window of Lightroom Backup Station."
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[dependencies]
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+log = "0.4"
+rusqlite = { version = "0.32", features = ["bundled"] }
+rayon = "1.10"
+mtp-rs = "0.33"
+tokio = { version = "1.53", features = ["fs", "io-util", "sync", "rt-multi-thread", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+blake3 = { version = "1.8.7", features = ["mmap", "rayon"] }
+globset = "0.4.20"
+xattr = "1.6.1"
+libc = "0.2.190"
+
+[dev-dependencies]
+mtp-rs = { version = "0.33", features = ["virtual-device"] }

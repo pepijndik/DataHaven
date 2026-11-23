@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["engine", "native", "src-tauri"]
+# `cargo build`, `cargo run` and `cargo test` use the native window and the engine.
+# The Tauri window is built with `npm run tauri:build`.
+default-members = ["engine", "native"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"
+
+# Hashing, scanning and SQLite run optimized even in debug builds, so test runs are fast too.
+[profile.dev.package."*"]
+opt-level = 2
