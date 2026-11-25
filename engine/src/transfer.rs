@@ -227,6 +227,11 @@ fn archive(current: &Path, archive_path: &Path) -> io::Result<()> {
 }
 
 /// Keeps Finder tags, color labels and other extended attributes. Failures are not fatal, many NAS shares do not support them.
+/// Windows has no extended attributes of this kind, so there it does nothing.
+#[cfg(windows)]
+fn copy_extended_attributes(_source: &Path, _destination: &Path) {}
+
+#[cfg(unix)]
 fn copy_extended_attributes(source: &Path, destination: &Path) {
     if !xattr::SUPPORTED_PLATFORM {
         return;
