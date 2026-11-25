@@ -1,13 +1,14 @@
 # DataHaven
 
-DataHaven is a macOS and Linux desktop app for backing up Lightroom catalogs, original photos, and video archives to user configured drives and NAS destinations.
+DataHaven is a macOS, Windows and Linux desktop app for backing up Lightroom catalogs, original photos, and video archives to user configured drives and NAS destinations.
 
 ## Download
 
 Get the newest build from the [Releases page](https://github.com/pepijndik/DataHaven/releases):
 
 1. **Mac:** open `DataHaven.dmg` and drag DataHaven to Applications. The app is not notarized yet, so the first time macOS blocks it. Try to open it once, then go to System Settings, Privacy & Security, and click "Open Anyway".
-2. **Linux:** unpack `DataHaven-linux-x86_64.tar.gz` and run `datahaven`.
+2. **Windows:** unpack `DataHaven-windows-x86_64.zip` and run `DataHaven.exe`. The app is not signed yet, so Windows SmartScreen may warn the first time. Click "More info", then "Run anyway".
+3. **Linux:** unpack `DataHaven-linux-x86_64.tar.gz` and run `datahaven`.
 
 Every change on `main` refreshes the "Latest build" download. A tag such as `v0.2.0` publishes a named release.
 
@@ -15,16 +16,16 @@ Every change on `main` refreshes the "Latest build" download. A tag such as `v0.
 
 Three steps make a backup: choose what (photos, videos, a Lightroom library or a whole drive), choose the drive or folder it is on, and choose the backup drive. After that, one button backs it up, and only what changed is copied. A backup can also run by itself whenever its drive is plugged in.
 
-The app is written in Rust from top to bottom. It has two windows on one shared engine:
+The app is written in Rust from top to bottom, in two parts:
 
-1. **The native window** (`native/`, built with egui). No web view and no JavaScript, so it starts in a fraction of a second and stays light while a backup runs. This is the main app.
-2. **The Tauri window** (`src/` and `src-tauri/`, React in a web view). Kept as a fallback. It reads and writes the same jobs, backup history and phone settings, so you can switch between the two at any time.
+1. **The window** (`native/`, built with egui). No web view and no JavaScript, so it starts in a fraction of a second and stays light while a backup runs.
+2. **The backup engine** (`engine/`), which holds all scanning, copying, verification, phone and NAS code.
 
-Both use the backup engine in `engine/`, which holds all scanning, copying, verification, phone and NAS code.
+Jobs, backup history and phone settings live in the same data folder the earlier versions used, so existing backups carry over.
 
 ## What works now
 
-1. A native Rust desktop window (and a React and Tauri fallback window) with configurable backup jobs that are saved between launches.
+1. A native Rust desktop window with configurable backup jobs that are saved between launches.
 2. A native Rust engine with a parallel scanner that skips excluded folders without entering them.
 3. A SQLite backup history (WAL, batched writes) so unchanged files are skipped without touching the destination.
 4. Resumable copies through `.lbpart` files that are flushed to disk before they replace the backup. Large and hashed files are read and written at the same time, so the source and the backup drive are both kept busy.
@@ -34,7 +35,9 @@ Both use the backup engine in `engine/`, which holds all scanning, copying, veri
 8. Read only volume health checks at quick, medium, and full levels.
 9. QNAP rsync over SSH as a destination type, with pause, cancel, filters, and archiving.
 10. Android phones (MTP) as a backup source, for example the camera roll, screenshots, and WhatsApp media, and as a destination folder on the phone.
-11. One click "Send to phone" that remembers the source folder, album, and storage per phone.
+11. One click "Send to phone" that remembers the source folder, album, and storage per phone. Android phones get the photos over USB. For an iPhone, the new photos go into an album in the Mac Photos app, which reaches the iPhone through iCloud Photos.
+12. A backup screen built around source, arrow and destination. Click the source or destination to pick another drive or folder, and set the schedule, what is included and older versions right below them. A short plan says in plain words what the next run will do.
+13. A History page with every run (when, how long, what was copied, and the result), kept between launches.
 
 ## Phones
 
@@ -43,6 +46,8 @@ A job source can be a folder on an Android phone (`"kind": "android"`, `"path": 
 A job can also back up to a phone with `"destinationKind": "android"`. Then `destinationRoot` is a folder on the phone (for example `Backup`) and `phone.deviceId` picks the phone. Changed files are replaced on the phone, which keeps no archive.
 
 On macOS the camera service (`ptpcamerad`) and Android File Transfer can hold the phone. The app shows a "Free the phone" button when that happens.
+
+An iPhone cannot receive files into an album over the cable from another app, so "Send to phone" for an iPhone adds the new photos and videos of a folder to an album in the Photos app on the Mac (made when it does not exist yet). With iCloud Photos on, the album shows up on the iPhone. The first time, macOS asks whether DataHaven may control Photos. What was sent is remembered per album in `iphone-sync.json`, so each run only adds new or changed files.
 
 ## Presets
 
@@ -60,33 +65,25 @@ Presets are JSON profile templates. The bundled ones live in `engine/presets`. D
 
 ## Commands
 
-Native window (needs only Rust):
+Only Rust is needed:
 
 ```bash
-cargo run --release      # start the native window
-npm run native:bundle    # macOS: build target/release/bundle/DataHaven.app (DMG=1 also makes a DMG)
-cargo test               # engine and native window tests
-```
-
-Tauri fallback window (needs Node as well):
-
-```bash
-npm install
-npm run tauri:dev
-npm run tauri:build
-npm run typecheck
+cargo run --release                  # start the app
+sh scripts/bundle-native-macos.sh    # macOS: build target/release/bundle/DataHaven.app
+DMG=1 sh scripts/bundle-native-macos.sh   # also make DataHaven.dmg
+cargo test                           # engine and window tests
 ```
 
 Release builds use link time optimisation, and debug builds compile the dependencies (hashing, SQLite) with optimisations, so test runs are fast as well.
 
 ## Sharing a test build
 
-Run `npm run tauri:build:share`. This builds a universal DMG of the Tauri window (Apple Silicon and Intel) at `target/universal-apple-darwin/release/bundle/dmg/`. The app is ad hoc signed but not notarized, so macOS blocks the first launch for the tester.
+Run `DMG=1 sh scripts/bundle-native-macos.sh`. This builds `target/release/bundle/DataHaven.dmg` (the GitHub build makes a universal one for Apple Silicon and Intel). The app is ad hoc signed but not notarized, so macOS blocks the first launch for the tester.
 
 The tester opens the DMG, drags the app to Applications, and then does one of the following:
 
 1. Try to open the app once, then go to System Settings, Privacy & Security, and click "Open Anyway".
-2. Or run `xattr -dr com.apple.quarantine /Applications/lightroom-backup-station.app` in Terminal.
+2. Or run `xattr -dr com.apple.quarantine /Applications/DataHaven.app` in Terminal.
 
 To skip this step, sign with a Developer ID certificate and notarize (set `APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID` before building).
 

@@ -65,16 +65,37 @@ jobs:
         run: |
           mkdir -p dist-linux/DataHaven
           cp target/release/backup-station dist-linux/DataHaven/datahaven
-          cp src-tauri/icons/128x128@2x.png dist-linux/DataHaven/datahaven.png
+          cp native/assets/window-icon.png dist-linux/DataHaven/datahaven.png
           tar -czf DataHaven-linux-x86_64.tar.gz -C dist-linux DataHaven
       - uses: actions/upload-artifact@v4
         with:
           name: DataHaven-linux
           path: DataHaven-linux-x86_64.tar.gz
 
+  windows:
+    name: Windows app
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p backup-engine
+      - run: cargo build --release -p backup-station
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist-windows/DataHaven | Out-Null
+          Copy-Item target/release/backup-station.exe dist-windows/DataHaven/DataHaven.exe
+          Compress-Archive -Path dist-windows/DataHaven -DestinationPath DataHaven-windows-x86_64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DataHaven-windows
+          path: DataHaven-windows-x86_64.zip
+
   release:
     name: Publish download
-    needs: [macos, linux]
+    needs: [macos, linux, windows]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
@@ -93,5 +114,5 @@ jobs:
             # Every change on main refreshes the "Latest build" download.
             gh release delete latest --cleanup-tag --yes || true
             gh release create latest downloads/* --prerelease --target "${GITHUB_SHA}" --title "Latest build" \
-              --notes "Built automatically from the newest code on main. Open DataHaven.dmg on a Mac, or unpack the Linux archive."
+              --notes "Built automatically from the newest code on main. Open DataHaven.dmg on a Mac, unpack DataHaven-windows-x86_64.zip on Windows, or unpack the Linux archive."
           fi

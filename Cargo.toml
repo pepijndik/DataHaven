@@ -1,9 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["engine", "native", "src-tauri"]
-# `cargo build`, `cargo run` and `cargo test` use the native window and the engine.
-# The Tauri window is built with `npm run tauri:build`.
-default-members = ["engine", "native"]
+members = ["engine", "native"]
 
 [profile.release]
 opt-level = 3

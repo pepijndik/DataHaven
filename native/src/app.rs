@@ -2,19 +2,22 @@
 //! access, health checks) runs on worker threads and reports back through one channel, so the
 //! window never waits for the disk.
 
+use crate::history::{self, RunRecord};
 use crate::model::{self, Job, Qnap, Source};
 use crate::phone::PhonePanel;
 use crate::style;
 use backup_engine::android::{self, AndroidDevice};
-use backup_engine::backup::{self, BackupPlan, BackupProgress, BackupRunResult, PreparedPlan, RunControl};
+use backup_engine::backup::{
+    self, BackupPlan, BackupProgress, BackupRunResult, PreparedPlan, RunControl,
+};
 use backup_engine::manifest::Manifest;
 use backup_engine::snapshots::{self, Snapshot};
 use backup_engine::volumes::{self, DestinationInfo, MountedVolume, VolumeHealth};
 use eframe::egui;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 /// A dry run is reused by the next backup of the same, unchanged job within this window, so the source is not scanned twice.
@@ -32,12 +35,20 @@ pub enum View {
     NewBackup,
     Drives,
     Phone,
+    /// Every past run, newest first.
+    History,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Tab {
     Status,
     Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PhoneTab {
+    Android,
+    Iphone,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -56,14 +67,29 @@ pub enum Event {
     Phones(Vec<AndroidDevice>),
     Plan(Result<(String, Arc<PreparedPlan>), String>),
     Progress(BackupProgress),
-    RunDone { job_id: String, result: Result<BackupRunResult, String> },
+    RunDone {
+        job_id: String,
+        result: Result<BackupRunResult, String>,
+    },
     Health(VolumeHealth),
     QnapFolders(Result<Vec<String>, String>),
-    Destination { root: String, info: DestinationInfo, snapshots: Vec<Snapshot> },
-    VolumeCreated { job_id: String, name: String, result: Result<String, String> },
-    JobForgotten { job_id: String, result: Result<(), String> },
+    Destination {
+        root: String,
+        info: DestinationInfo,
+        snapshots: Vec<Snapshot>,
+    },
+    VolumeCreated {
+        job_id: String,
+        name: String,
+        result: Result<String, String>,
+    },
+    JobForgotten {
+        job_id: String,
+        result: Result<(), String>,
+    },
     Saved(Result<(), String>),
     Phone(crate::phone::PhoneEvent),
+    Iphone(crate::iphone::IphoneEvent),
 }
 
 pub struct ActiveRun {
@@ -71,6 +97,9 @@ pub struct ActiveRun {
     pub job_id: String,
     pub control: RunControl,
     pub paused: bool,
+    /// Unix seconds.
+    pub started_at: u64,
+    pub automatic: bool,
 }
 
 struct CachedPlan {
@@ -121,9 +150,16 @@ pub struct App {
     destinations_loading: HashSet<String>,
     pub editor: EditorState,
     pub phone: PhonePanel,
+    pub iphone: crate::iphone::IphonePanel,
+    /// Which phone the Send to phone page shows.
+    pub phone_tab: PhoneTab,
     /// The open New backup card, if any.
     pub wizard: Option<crate::wizard::Wizard>,
     pub icon: Option<egui::TextureHandle>,
+    /// Past runs, newest first.
+    pub history: Vec<RunRecord>,
+    /// The History page shows only the selected backup.
+    pub history_only_selected: bool,
     last_plan: Option<CachedPlan>,
     dirty_since: Option<Instant>,
     was_available: HashMap<String, bool>,
@@ -162,13 +198,18 @@ impl App {
             destinations_loading: HashSet::new(),
             editor: EditorState::default(),
             phone: PhonePanel::default(),
+            iphone: Default::default(),
+            phone_tab: PhoneTab::Android,
             wizard: None,
             icon: None,
+            history: Vec::new(),
+            history_only_selected: false,
             last_plan: None,
             dirty_since: None,
             was_available: HashMap::new(),
             last_auto_tick: Instant::now(),
         };
+        app.history = history::load(&app.data_dir);
         app.load_jobs();
         if watch {
             app.start_watchers();
@@ -198,13 +239,15 @@ impl App {
         let ctx = self.ctx.clone();
         std::thread::Builder::new()
             .name("volume-watch".into())
-            .spawn(move || loop {
-                let found = volumes::detect();
-                if sender.send(Event::Volumes(found, true)).is_err() {
-                    return;
+            .spawn(move || {
+                loop {
+                    let found = volumes::detect();
+                    if sender.send(Event::Volumes(found, true)).is_err() {
+                        return;
+                    }
+                    ctx.request_repaint();
+                    std::thread::sleep(VOLUME_POLL);
                 }
-                ctx.request_repaint();
-                std::thread::sleep(VOLUME_POLL);
             })
             .ok();
 
@@ -225,11 +268,17 @@ impl App {
     }
 
     pub fn selected_job(&self) -> Option<&Job> {
-        self.jobs.iter().find(|job| job.id == self.selected).or(self.jobs.first())
+        self.jobs
+            .iter()
+            .find(|job| job.id == self.selected)
+            .or(self.jobs.first())
     }
 
     pub fn selected_index(&self) -> Option<usize> {
-        self.jobs.iter().position(|job| job.id == self.selected).or(if self.jobs.is_empty() { None } else { Some(0) })
+        self.jobs
+            .iter()
+            .position(|job| job.id == self.selected)
+            .or(if self.jobs.is_empty() { None } else { Some(0) })
     }
 
     pub fn mark_dirty(&mut self) {
@@ -275,12 +324,19 @@ impl App {
                 self.busy = None;
                 match result {
                     Ok(jobs) => {
-                        self.selected = jobs.iter().find(|job| job.id == "lightroom-optimized").or(jobs.first()).map(|job| job.id.clone()).unwrap_or_default();
+                        self.selected = jobs
+                            .iter()
+                            .find(|job| job.id == "lightroom-optimized")
+                            .or(jobs.first())
+                            .map(|job| job.id.clone())
+                            .unwrap_or_default();
                         self.jobs = jobs;
                         self.jobs_loaded = true;
                         // Nothing set up yet: start with the New backup card.
                         if !self.jobs.iter().any(Job::is_configured) {
-                            self.open_wizard(crate::wizard::Wizard::new(crate::wizard::Kind::Photos));
+                            self.open_wizard(crate::wizard::Wizard::new(
+                                crate::wizard::Kind::Photos,
+                            ));
                         }
                         self.message = "Your backup jobs are ready.".to_string();
                         self.auto_run_tick();
@@ -289,7 +345,10 @@ impl App {
                 }
             }
             Event::Volumes(found, silent) => {
-                let changed = found.iter().map(|volume| &volume.path).ne(self.volumes.iter().map(|volume| &volume.path));
+                let changed = found
+                    .iter()
+                    .map(|volume| &volume.path)
+                    .ne(self.volumes.iter().map(|volume| &volume.path));
                 self.volumes = found;
                 if !silent {
                     self.busy = None;
@@ -312,22 +371,33 @@ impl App {
                 self.busy = None;
                 match result {
                     Ok((fingerprint, prepared)) => {
-                        self.message = format!("{} files are ready to be written.", prepared.plan.totals.files_to_write);
+                        self.message = format!(
+                            "{} files are ready to be written.",
+                            prepared.plan.totals.files_to_write
+                        );
                         self.plan = Some(prepared.plan.clone());
-                        self.last_plan = Some(CachedPlan { fingerprint, created: Instant::now(), plan: prepared });
+                        self.last_plan = Some(CachedPlan {
+                            fingerprint,
+                            created: Instant::now(),
+                            plan: prepared,
+                        });
                     }
                     Err(error) => self.message = error,
                 }
             }
             Event::Progress(progress) => {
-                let ours = self.run.as_ref().is_some_and(|run| run.id == progress.run_id);
+                let ours = self
+                    .run
+                    .as_ref()
+                    .is_some_and(|run| run.id == progress.run_id);
                 if ours {
                     self.progress = Some(progress);
                 }
             }
             Event::RunDone { job_id, result } => {
-                self.run = None;
+                let run = self.run.take();
                 self.busy = None;
+                self.record_run(&job_id, run.as_ref(), &result);
                 match result {
                     Ok(result) => {
                         if !result.cancelled {
@@ -337,9 +407,16 @@ impl App {
                             }
                             self.mark_dirty();
                         }
-                        let versions = result.snapshot.as_ref().map(|name| format!(" Snapshot {name} saved.")).unwrap_or_default();
+                        let versions = result
+                            .snapshot
+                            .as_ref()
+                            .map(|name| format!(" Snapshot {name} saved."))
+                            .unwrap_or_default();
                         self.message = if result.failed_files == 0 {
-                            format!("{} files backed up successfully.{versions}", result.copied_files)
+                            format!(
+                                "{} files backed up successfully.{versions}",
+                                result.copied_files
+                            )
                         } else {
                             format!("{} files need attention.{versions}", result.failed_files)
                         };
@@ -366,11 +443,25 @@ impl App {
                     Err(error) => self.message = error,
                 }
             }
-            Event::Destination { root, info, snapshots } => {
+            Event::Destination {
+                root,
+                info,
+                snapshots,
+            } => {
                 self.destinations_loading.remove(&root);
-                self.destinations.insert(root, DestinationState { info: Some(info), snapshots });
+                self.destinations.insert(
+                    root,
+                    DestinationState {
+                        info: Some(info),
+                        snapshots,
+                    },
+                );
             }
-            Event::VolumeCreated { job_id, name, result } => {
+            Event::VolumeCreated {
+                job_id,
+                name,
+                result,
+            } => {
                 if self.editor.job_id == job_id {
                     self.editor.creating_volume = false;
                 }
@@ -385,7 +476,9 @@ impl App {
                         self.mark_dirty();
                         if self.editor.job_id == job_id {
                             self.editor.volume_name = None;
-                            self.editor.volume_status = Some(format!("Volume {name} is ready. It shares the free space of the drive."));
+                            self.editor.volume_status = Some(format!(
+                                "Volume {name} is ready. It shares the free space of the drive."
+                            ));
                         }
                     }
                     Err(error) => {
@@ -397,9 +490,18 @@ impl App {
             }
             Event::JobForgotten { job_id, result } => match result {
                 Ok(()) => {
-                    let name = self.jobs.iter().find(|job| job.id == job_id).map(|job| job.name.clone()).unwrap_or_default();
+                    let name = self
+                        .jobs
+                        .iter()
+                        .find(|job| job.id == job_id)
+                        .map(|job| job.name.clone())
+                        .unwrap_or_default();
                     self.jobs.retain(|job| job.id != job_id);
-                    self.selected = self.jobs.first().map(|job| job.id.clone()).unwrap_or_default();
+                    self.selected = self
+                        .jobs
+                        .first()
+                        .map(|job| job.id.clone())
+                        .unwrap_or_default();
                     self.plan = None;
                     self.run_result = None;
                     self.message = format!("{name} removed.");
@@ -413,6 +515,7 @@ impl App {
                 }
             }
             Event::Phone(event) => crate::phone::handle(self, event),
+            Event::Iphone(event) => crate::iphone::handle(self, event),
         }
     }
 
@@ -421,15 +524,127 @@ impl App {
         if root.is_empty() {
             return None;
         }
-        if !self.destinations.contains_key(root) && self.destinations_loading.insert(root.to_string()) {
+        if !self.destinations.contains_key(root)
+            && self.destinations_loading.insert(root.to_string())
+        {
             let root = root.to_string();
             self.spawn(move || {
                 let info = volumes::inspect_destination(&root);
                 let snapshots = snapshots::list(Path::new(&root));
-                Event::Destination { root, info, snapshots }
+                Event::Destination {
+                    root,
+                    info,
+                    snapshots,
+                }
             });
         }
         self.destinations.get(root)
+    }
+
+    /// Adds a finished run to the history and saves it off the UI thread.
+    fn record_run(
+        &mut self,
+        job_id: &str,
+        run: Option<&ActiveRun>,
+        result: &Result<BackupRunResult, String>,
+    ) {
+        let job = self.jobs.iter().find(|job| job.id == job_id);
+        let now = model::unix_now();
+        let started_at = run.map(|run| run.started_at).unwrap_or(now);
+        let mut record = RunRecord {
+            job_id: job_id.to_string(),
+            job_name: job
+                .map(|job| job.name.clone())
+                .unwrap_or_else(|| job_id.to_string()),
+            source: job.map(source_summary).unwrap_or_default(),
+            destination: job
+                .map(|job| job.destination_root.clone())
+                .unwrap_or_default(),
+            started_at,
+            duration_seconds: now.saturating_sub(started_at),
+            automatic: run.is_some_and(|run| run.automatic),
+            ..Default::default()
+        };
+        match result {
+            Ok(result) => {
+                let copied_bytes = if result.cancelled {
+                    self.progress
+                        .as_ref()
+                        .map(|progress| progress.copied_bytes)
+                        .unwrap_or(0)
+                } else {
+                    result.plan.totals.bytes_to_write
+                };
+                record.copied_files = result.copied_files;
+                record.copied_bytes = copied_bytes;
+                record.skipped_files = result.plan.totals.files_skipped;
+                record.archived_files = result.archived_files;
+                record.failed_files = result.failed_files;
+                record.cancelled = result.cancelled;
+            }
+            Err(error) => record.error = Some(error.clone()),
+        }
+        history::push(&mut self.history, record);
+        let directory = self.data_dir.clone();
+        let records = self.history.clone();
+        self.spawn(move || Event::Saved(history::save(&directory, &records)));
+    }
+
+    /// The newest run of a job, if any.
+    pub fn last_run(&self, job_id: &str) -> Option<&RunRecord> {
+        self.history.iter().find(|record| record.job_id == job_id)
+    }
+
+    /// Points the selected job's (single) source at `path`. Jobs with several sources are edited in Settings.
+    pub fn set_source(&mut self, job_id: &str, path: String) {
+        let Some(job) = self.jobs.iter_mut().find(|job| job.id == job_id) else {
+            return;
+        };
+        let label = match volumes::last_component(&path) {
+            "" => "Source".to_string(),
+            name => name.to_string(),
+        };
+        match job.sources.iter_mut().find(|source| !source.is_phone()) {
+            Some(source) => {
+                source.path = path;
+                source.label = label;
+            }
+            None => {
+                let id = job.unique_source_id("source");
+                job.sources.push(Source {
+                    id,
+                    label,
+                    path,
+                    category: "other".into(),
+                    ..Default::default()
+                });
+            }
+        }
+        self.message = "Source changed.".to_string();
+        self.plan = None;
+        self.mark_dirty();
+    }
+
+    pub fn set_destination(&mut self, job_id: &str, path: String) {
+        let Some(job) = self.jobs.iter_mut().find(|job| job.id == job_id) else {
+            return;
+        };
+        job.destination_kind = "local".to_string();
+        job.destination_root = path;
+        self.message = "Destination changed.".to_string();
+        self.plan = None;
+        self.mark_dirty();
+    }
+
+    /// Changes a job in place and saves it shortly after.
+    pub fn update_job(&mut self, job_id: &str, change: impl FnOnce(&mut Job)) {
+        if let Some(job) = self.jobs.iter_mut().find(|job| job.id == job_id) {
+            let before = job.clone();
+            change(job);
+            if *job != before {
+                self.mark_dirty();
+            }
+        }
     }
 
     // ---- automatic runs -------------------------------------------------------------------
@@ -439,13 +654,26 @@ impl App {
         if job.destination_root.is_empty() || job.sources.is_empty() {
             return false;
         }
-        let mounted = |path: &str| !path.starts_with("/Volumes/") || self.volumes.iter().any(|volume| path == volume.path || path.starts_with(&format!("{}/", volume.path)));
+        let mounted = |path: &str| {
+            volumes::external_drive_name(path).is_none()
+                || self
+                    .volumes
+                    .iter()
+                    .any(|volume| volumes::volume_contains(&volume.path, path))
+        };
         let destination_ready = match job.destination_kind.as_str() {
             "android" => !self.phones.is_empty(),
             "qnap-rsync" => true,
             _ => mounted(&job.destination_root),
         };
-        destination_ready && job.sources.iter().all(|source| if source.is_phone() { !self.phones.is_empty() } else { !source.path.is_empty() && mounted(&source.path) })
+        destination_ready
+            && job.sources.iter().all(|source| {
+                if source.is_phone() {
+                    !self.phones.is_empty()
+                } else {
+                    !source.path.is_empty() && mounted(&source.path)
+                }
+            })
     }
 
     /// Starts a job when its drive (or phone) is connected, and on its schedule. One run at a time.
@@ -502,7 +730,9 @@ impl App {
         let directory = self.data_dir.clone();
         let fingerprint = job.fingerprint();
         self.spawn(move || {
-            let result = Manifest::open(&directory).and_then(|manifest| backup::plan(&profile, &manifest)).map(|prepared| (fingerprint, Arc::new(prepared)));
+            let result = Manifest::open(&directory)
+                .and_then(|manifest| backup::plan(&profile, &manifest))
+                .map(|prepared| (fingerprint, Arc::new(prepared)));
             Event::Plan(result)
         });
     }
@@ -525,10 +755,23 @@ impl App {
             Err(error) => return self.message = error,
         };
         let fingerprint = job.fingerprint();
-        let cached = self.last_plan.take().filter(|cached| cached.fingerprint == fingerprint && cached.created.elapsed() < PLAN_REUSE_WINDOW).map(|cached| cached.plan);
+        let cached = self
+            .last_plan
+            .take()
+            .filter(|cached| {
+                cached.fingerprint == fingerprint && cached.created.elapsed() < PLAN_REUSE_WINDOW
+            })
+            .map(|cached| cached.plan);
         let run_id = model::new_id("run");
         let control = RunControl::new();
-        self.run = Some(ActiveRun { id: run_id.clone(), job_id: job.id.clone(), control: control.clone(), paused: false });
+        self.run = Some(ActiveRun {
+            id: run_id.clone(),
+            job_id: job.id.clone(),
+            control: control.clone(),
+            paused: false,
+            started_at: model::unix_now(),
+            automatic,
+        });
         self.progress = None;
         self.busy = Some(Busy::Run);
         if automatic {
@@ -580,7 +823,9 @@ impl App {
     }
 
     pub fn load_qnap_folders(&mut self) {
-        let Some(profile) = self.selected_job().map(Job::engine_profile) else { return };
+        let Some(profile) = self.selected_job().map(Job::engine_profile) else {
+            return;
+        };
         let profile = match profile {
             Ok(profile) => profile,
             Err(error) => return self.message = error,
@@ -594,7 +839,11 @@ impl App {
         self.editor.volume_status = None;
         self.spawn(move || {
             let result = volumes::create_job_volume(&root, &name);
-            Event::VolumeCreated { job_id, name, result }
+            Event::VolumeCreated {
+                job_id,
+                name,
+                result,
+            }
         });
     }
 
@@ -603,26 +852,42 @@ impl App {
             self.message = "That folder is not available. Is the drive connected?".to_string();
             return;
         }
-        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        let opener = if cfg!(target_os = "macos") {
+            "open"
+        } else if cfg!(windows) {
+            "explorer"
+        } else {
+            "xdg-open"
+        };
         if let Err(error) = std::process::Command::new(opener).arg(path).spawn() {
             self.message = error.to_string();
         }
     }
 
     pub fn remove_job(&mut self, job_id: &str) {
-        if self.run.as_ref().is_some_and(|run| run.job_id == job_id) || self.busy == Some(Busy::Run) {
+        if self.run.as_ref().is_some_and(|run| run.job_id == job_id) || self.busy == Some(Busy::Run)
+        {
             self.message = "Stop the running backup before removing a job.".to_string();
             return;
         }
-        let Some(job) = self.jobs.iter().find(|job| job.id == job_id) else { return };
-        let question = format!("Remove \"{}\"? Files it already backed up stay on the drive. Only the job and its history are removed.", job.name);
+        let Some(job) = self.jobs.iter().find(|job| job.id == job_id) else {
+            return;
+        };
+        let question = format!(
+            "Remove \"{}\"? Files it already backed up stay on the drive. Only the job and its history are removed.",
+            job.name
+        );
         let answer = rfd::MessageDialog::new()
             .set_level(rfd::MessageLevel::Warning)
             .set_title("Remove job")
             .set_description(question)
-            .set_buttons(rfd::MessageButtons::OkCancelCustom("Remove".into(), "Keep".into()))
+            .set_buttons(rfd::MessageButtons::OkCancelCustom(
+                "Remove".into(),
+                "Keep".into(),
+            ))
             .show();
-        let confirmed = matches!(answer, rfd::MessageDialogResult::Ok) || matches!(&answer, rfd::MessageDialogResult::Custom(label) if label == "Remove");
+        let confirmed = matches!(answer, rfd::MessageDialogResult::Ok)
+            || matches!(&answer, rfd::MessageDialogResult::Custom(label) if label == "Remove");
         if !confirmed {
             return;
         }
@@ -638,7 +903,11 @@ impl App {
         self.selected = job.id.clone();
         self.jobs.push(job);
         self.view = View::Backup;
-        self.tab = if open_settings { Tab::Settings } else { Tab::Status };
+        self.tab = if open_settings {
+            Tab::Settings
+        } else {
+            Tab::Status
+        };
         self.message = message;
         self.mark_dirty();
     }
@@ -649,27 +918,69 @@ impl App {
             self.message = "Choose a configured job before adding a drive.".to_string();
             return;
         };
-        let Some(folder) = pick_folder(None) else { return };
-        let drive = folder.rsplit('/').find(|part| !part.is_empty()).unwrap_or("New drive").to_string();
-        let copy = Job { id: model::new_id(&job.id), name: format!("{} on {drive}", job.name), destination_kind: "local".to_string(), destination_root: folder, last_run_at: None, ..job };
-        self.add_job(copy, false, format!("{drive} added as a backup destination."));
+        let Some(folder) = pick_folder(None) else {
+            return;
+        };
+        let drive = match volumes::last_component(&folder) {
+            "" => "New drive".to_string(),
+            name => name.to_string(),
+        };
+        let copy = Job {
+            id: model::new_id(&job.id),
+            name: format!("{} on {drive}", job.name),
+            destination_kind: "local".to_string(),
+            destination_root: folder,
+            last_run_at: None,
+            ..job
+        };
+        self.add_job(
+            copy,
+            false,
+            format!("{drive} added as a backup destination."),
+        );
     }
 
     pub fn create_phone_job(&mut self, device: Option<AndroidDevice>) {
-        let preset = model::presets(&self.data_dir).into_iter().find(|preset| preset.id == "phone-camera-roll").unwrap_or_else(phone_preset_fallback);
-        let phone_name = device.as_ref().map(|device| format!("{} {}", style::title_case(&device.manufacturer), device.model)).unwrap_or_else(|| "phone".to_string());
+        let preset = model::presets(&self.data_dir)
+            .into_iter()
+            .find(|preset| preset.id == "phone-camera-roll")
+            .unwrap_or_else(phone_preset_fallback);
+        let phone_name = device
+            .as_ref()
+            .map(|device| {
+                format!(
+                    "{} {}",
+                    style::title_case(&device.manufacturer),
+                    device.model
+                )
+            })
+            .unwrap_or_else(|| "phone".to_string());
         let device_id = device.map(|device| device.id).unwrap_or_default();
         let first_volume = self.volumes.first().cloned();
         let job = Job {
             id: model::new_id("phone"),
             preset: Some("phone-camera-roll".to_string()),
             name: format!("Back up {phone_name}"),
-            destination_root: first_volume.as_ref().map(|volume| volume.path.clone()).unwrap_or_default(),
-            sources: preset.sources.iter().cloned().map(|source| Source { device_id: Some(device_id.clone()), ..source }).collect(),
+            destination_root: first_volume
+                .as_ref()
+                .map(|volume| volume.path.clone())
+                .unwrap_or_default(),
+            sources: preset
+                .sources
+                .iter()
+                .cloned()
+                .map(|source| Source {
+                    device_id: Some(device_id.clone()),
+                    ..source
+                })
+                .collect(),
             ..preset
         };
         let message = match first_volume {
-            Some(volume) => format!("Phone backup job created on {}. Check the folders, then run it.", volume.name),
+            Some(volume) => format!(
+                "Phone backup job created on {}. Check the folders, then run it.",
+                volume.name
+            ),
             None => "Phone backup job created. Choose the drive to back up to.".to_string(),
         };
         self.add_job(job, true, message);
@@ -684,11 +995,23 @@ impl App {
             destination_root: "/share/Backups".to_string(),
             mode: "safe-mirror".to_string(),
             verification: "metadata".to_string(),
-            qnap: Some(Qnap { share: String::new(), ..Qnap::default() }),
-            sources: vec![Source { id: "source".into(), label: "Choose a source folder".into(), category: "other".into(), ..Default::default() }],
+            qnap: Some(Qnap {
+                share: String::new(),
+                ..Qnap::default()
+            }),
+            sources: vec![Source {
+                id: "source".into(),
+                label: "Choose a source folder".into(),
+                category: "other".into(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
-        self.add_job(job, true, "QNAP job created. Enter the NAS connection details.".to_string());
+        self.add_job(
+            job,
+            true,
+            "QNAP job created. Enter the NAS connection details.".to_string(),
+        );
     }
 
     /// Writes unsaved changes before the window closes.
@@ -700,7 +1023,15 @@ impl App {
 }
 
 fn phone_preset_fallback() -> Job {
-    let source = |id: &str, label: &str, path: &str| Source { id: id.into(), label: label.into(), path: path.into(), category: "photos".into(), kind: Some("android".into()), device_id: Some(String::new()), ..Default::default() };
+    let source = |id: &str, label: &str, path: &str| Source {
+        id: id.into(),
+        label: label.into(),
+        path: path.into(),
+        category: "photos".into(),
+        kind: Some("android".into()),
+        device_id: Some(String::new()),
+        ..Default::default()
+    };
     Job {
         id: "phone-camera-roll".into(),
         preset: Some("phone-camera-roll".into()),
@@ -714,6 +1045,29 @@ fn phone_preset_fallback() -> Job {
     }
 }
 
+/// One short line naming what a job backs up.
+pub fn source_summary(job: &Job) -> String {
+    match job.sources.as_slice() {
+        [] => String::new(),
+        [one] => {
+            if one.is_phone() {
+                format!("Phone: {}", one.label)
+            } else {
+                one.path.clone()
+            }
+        }
+        [first, rest @ ..] => format!(
+            "{} and {} more",
+            if first.is_phone() {
+                first.label.clone()
+            } else {
+                first.path.clone()
+            },
+            rest.len()
+        ),
+    }
+}
+
 /// Native folder picker.
 pub fn pick_folder(start_at: Option<&str>) -> Option<String> {
     let mut dialog = rfd::FileDialog::new();
@@ -724,7 +1078,9 @@ pub fn pick_folder(start_at: Option<&str>) -> Option<String> {
 }
 
 pub fn load_icon(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let image = image::load_from_memory(include_bytes!("../../src/assets/app-icon.png")).ok()?.to_rgba8();
+    let image = image::load_from_memory(include_bytes!("../assets/app-icon.png"))
+        .ok()?
+        .to_rgba8();
     let size = [image.width() as usize, image.height() as usize];
     let color = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
     Some(ctx.load_texture("app-icon", color, egui::TextureOptions::LINEAR))
@@ -751,7 +1107,8 @@ pub mod tests {
 
     /// An app on a temporary data folder with sample drives, a dry run and a finished run.
     pub fn sample_app(ctx: &egui::Context, name: &str) -> App {
-        let directory = std::env::temp_dir().join(format!("lbs-native-{name}-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("lbs-native-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         let mut app = App::build(ctx.clone(), directory, false);
         let started = Instant::now();
@@ -761,13 +1118,31 @@ pub mod tests {
         }
         assert!(app.jobs_loaded, "the bundled presets load on first launch");
         app.volumes = vec![
-            MountedVolume { name: "T7 Shield".into(), path: "/Volumes/T7 Shield".into(), filesystem: "apfs".into(), capacity: Some(2_000_000_000_000), available: Some(812_000_000_000) },
-            MountedVolume { name: "Archive".into(), path: "/Volumes/Archive".into(), filesystem: "exfat".into(), capacity: None, available: None },
+            MountedVolume {
+                name: "T7 Shield".into(),
+                path: "/Volumes/T7 Shield".into(),
+                filesystem: "apfs".into(),
+                capacity: Some(2_000_000_000_000),
+                available: Some(812_000_000_000),
+            },
+            MountedVolume {
+                name: "Archive".into(),
+                path: "/Volumes/Archive".into(),
+                filesystem: "exfat".into(),
+                capacity: None,
+                available: None,
+            },
         ];
         if let Some(job) = app.jobs.first_mut() {
             job.destination_root = "/Volumes/T7 Shield/Lightroom".into();
             job.last_run_at = Some(model::unix_now() - 7_200);
-            job.sources = vec![Source { id: "photos".into(), label: "Photos".into(), path: "/Users/me/Pictures/Lightroom".into(), category: "photos".into(), ..Default::default() }];
+            job.sources = vec![Source {
+                id: "photos".into(),
+                label: "Photos".into(),
+                path: "/Users/me/Pictures/Lightroom".into(),
+                category: "photos".into(),
+                ..Default::default()
+            }];
         }
         let plan = BackupPlan {
             profile_id: "lightroom-optimized".into(),
@@ -776,15 +1151,62 @@ pub mod tests {
             entries: Vec::new(),
             entries_truncated: false,
             warnings: Vec::new(),
-            totals: BackupTotals { scanned_files: 48_210, files_to_write: 312, files_skipped: 47_898, bytes_to_write: 6_400_000_000, ..Default::default() },
+            totals: BackupTotals {
+                scanned_files: 48_210,
+                files_to_write: 312,
+                files_skipped: 47_898,
+                bytes_to_write: 6_400_000_000,
+                ..Default::default()
+            },
         };
-        app.run_result = Some(BackupRunResult { plan: plan.clone(), completed_at: "1760000900".into(), copied_files: 312, archived_files: 4, failed_files: 0, cancelled: false, errors: Vec::new(), snapshot: None });
+        app.run_result = Some(BackupRunResult {
+            plan: plan.clone(),
+            completed_at: "1760000900".into(),
+            copied_files: 312,
+            archived_files: 4,
+            failed_files: 0,
+            cancelled: false,
+            errors: Vec::new(),
+            snapshot: None,
+        });
         app.plan = Some(plan);
+        let now = model::unix_now();
+        let first = app.jobs[0].clone();
+        let second = app.jobs.get(1).cloned().unwrap_or_else(|| first.clone());
+        let record = |job: &Job, ago: u64, copied: u64, failed: u64, automatic: bool| RunRecord {
+            job_id: job.id.clone(),
+            job_name: job.name.clone(),
+            source: "/Users/me/Pictures/Lightroom".into(),
+            destination: "/Volumes/T7 Shield/Lightroom".into(),
+            started_at: now - ago,
+            duration_seconds: 95 + copied / 10,
+            copied_files: copied,
+            copied_bytes: copied * 21_000_000,
+            skipped_files: 47_898,
+            failed_files: failed,
+            automatic,
+            ..Default::default()
+        };
+        app.history = vec![
+            record(&first, 7_200, 312, 0, false),
+            record(&second, 90_000, 40, 3, true),
+            record(&first, 200_000, 1_204, 0, true),
+            RunRecord {
+                cancelled: true,
+                ..record(&first, 400_000, 12, 0, false)
+            },
+        ];
         app
     }
 
     fn frame(ctx: &egui::Context, app: &mut App) {
-        let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1240.0, 860.0))), ..Default::default() };
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1240.0, 860.0),
+            )),
+            ..Default::default()
+        };
         let mut output = ctx.run_ui(input, |ui| crate::views::show(app, ui));
         output.textures_delta.clear();
     }
@@ -795,19 +1217,48 @@ pub mod tests {
         crate::style::apply(&ctx);
         let mut app = sample_app(&ctx, "screens");
         app.open_wizard(crate::wizard::Wizard::new(crate::wizard::Kind::Photos));
-        for (view, tab) in [(View::Backup, Tab::Status), (View::Backup, Tab::Settings), (View::NewBackup, Tab::Status), (View::Drives, Tab::Status), (View::Phone, Tab::Status)] {
+        for (view, tab) in [
+            (View::Backup, Tab::Status),
+            (View::Backup, Tab::Settings),
+            (View::NewBackup, Tab::Status),
+            (View::Drives, Tab::Status),
+            (View::Phone, Tab::Status),
+            (View::History, Tab::Status),
+        ] {
             app.view = view;
             app.tab = tab;
             for _ in 0..3 {
                 frame(&ctx, &mut app);
             }
         }
-        app.progress = Some(BackupProgress { run_id: "r".into(), event: "copying".into(), path: Some("/Users/me/Pictures/IMG_0001.CR3".into()), discovered_files: 48_210, evaluated_files: 48_210, completed_files: 120, total_files: 312, copied_bytes: 2_000_000_000, total_bytes: 6_400_000_000, elapsed_seconds: 42, bytes_per_second: 48_000_000 });
-        app.run = Some(ActiveRun { id: "r".into(), job_id: app.jobs[0].id.clone(), control: RunControl::new(), paused: false });
+        app.progress = Some(BackupProgress {
+            run_id: "r".into(),
+            event: "copying".into(),
+            path: Some("/Users/me/Pictures/IMG_0001.CR3".into()),
+            discovered_files: 48_210,
+            evaluated_files: 48_210,
+            completed_files: 120,
+            total_files: 312,
+            copied_bytes: 2_000_000_000,
+            total_bytes: 6_400_000_000,
+            elapsed_seconds: 42,
+            bytes_per_second: 48_000_000,
+        });
+        app.run = Some(ActiveRun {
+            id: "r".into(),
+            job_id: app.jobs[0].id.clone(),
+            control: RunControl::new(),
+            paused: false,
+            started_at: 0,
+            automatic: false,
+        });
         app.view = View::Backup;
         app.tab = Tab::Status;
         frame(&ctx, &mut app);
-        assert!(app.dirty_since.is_none(), "drawing alone never changes a job");
+        assert!(
+            app.dirty_since.is_none(),
+            "drawing alone never changes a job"
+        );
     }
 
     /// Renders both pages to PNG files in the temp folder, to look at the window without opening it.
@@ -820,20 +1271,67 @@ pub mod tests {
         let cases = [
             (View::Backup, Tab::Status, "backup", false, 860.0),
             (View::Backup, Tab::Status, "backup-running", true, 860.0),
-            (View::Backup, Tab::Settings, "backup-settings", false, 1900.0),
+            (
+                View::Backup,
+                Tab::Settings,
+                "backup-settings",
+                false,
+                1900.0,
+            ),
             (View::NewBackup, Tab::Status, "new-backup", false, 860.0),
             (View::Drives, Tab::Status, "drives", false, 860.0),
+            (View::History, Tab::Status, "history", false, 860.0),
+            (View::Phone, Tab::Status, "phone-android", false, 860.0),
+            (View::Phone, Tab::Status, "phone-iphone", false, 860.0),
         ];
         for (view, tab, name, progress, height) in cases {
             let mut app = sample_app(&egui::Context::default(), name);
             app.view = view;
             app.tab = tab;
+            if name == "phone-iphone" {
+                app.phone_tab = PhoneTab::Iphone;
+                app.iphone.loaded = true;
+                app.iphone.settings.source = Some("/Users/me/Pictures/Holiday 2026".into());
+                app.iphone.settings.album = "Holiday".into();
+                app.iphone.result = Some(crate::iphone::IphoneResult {
+                    dry_run: true,
+                    sent: 48,
+                    skipped: 312,
+                    bytes: 420_000_000,
+                    album: "Holiday".into(),
+                    ..Default::default()
+                });
+            }
             if view == View::NewBackup {
-                app.wizard = Some(crate::wizard::Wizard { kind: crate::wizard::Kind::Videos, source: "/Volumes/Archive".into(), destination: "/Volumes/T7 Shield".into(), error: None });
+                app.wizard = Some(crate::wizard::Wizard {
+                    kind: crate::wizard::Kind::Videos,
+                    source: "/Volumes/Archive".into(),
+                    destination: "/Volumes/T7 Shield".into(),
+                    error: None,
+                });
             }
             if progress {
-                app.progress = Some(BackupProgress { run_id: "r".into(), event: "copying".into(), path: Some("/Users/me/Pictures/2025/IMG_0001.CR3".into()), discovered_files: 48_210, evaluated_files: 48_210, completed_files: 120, total_files: 312, copied_bytes: 2_000_000_000, total_bytes: 6_400_000_000, elapsed_seconds: 42, bytes_per_second: 48_000_000 });
-                app.run = Some(ActiveRun { id: "r".into(), job_id: app.jobs[0].id.clone(), control: RunControl::new(), paused: false });
+                app.progress = Some(BackupProgress {
+                    run_id: "r".into(),
+                    event: "copying".into(),
+                    path: Some("/Users/me/Pictures/2025/IMG_0001.CR3".into()),
+                    discovered_files: 48_210,
+                    evaluated_files: 48_210,
+                    completed_files: 120,
+                    total_files: 312,
+                    copied_bytes: 2_000_000_000,
+                    total_bytes: 6_400_000_000,
+                    elapsed_seconds: 42,
+                    bytes_per_second: 48_000_000,
+                });
+                app.run = Some(ActiveRun {
+                    id: "r".into(),
+                    job_id: app.jobs[0].id.clone(),
+                    control: RunControl::new(),
+                    paused: false,
+                    started_at: 0,
+                    automatic: false,
+                });
             }
             let mut harness = egui_kittest::Harness::builder()
                 .with_size(egui::vec2(1240.0, height))
@@ -845,5 +1343,27 @@ pub mod tests {
             let image = harness.render().expect("renders");
             image.save(out.join(format!("{name}.png"))).unwrap();
         }
+
+        // Clicking the destination opens the menu of drives to back up to.
+        let mut app = sample_app(&egui::Context::default(), "menu");
+        app.view = View::Backup;
+        app.tab = Tab::Status;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(1240.0, 860.0))
+            .with_pixels_per_point(1.0)
+            .with_context_setup(crate::style::apply)
+            .wgpu()
+            .build_ui_state(|ui, app: &mut App| crate::views::show(app, ui), app);
+        harness.run_steps(3);
+        let spot = egui::pos2(1003.0, 260.0);
+        harness.event(egui::Event::PointerMoved(spot));
+        harness.run_steps(1);
+        for pressed in [true, false] {
+            harness.event(egui::Event::PointerButton { pos: spot, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+            harness.run_steps(1);
+        }
+        harness.run_steps(3);
+        let image = harness.render().expect("renders");
+        image.save(out.join("backup-destination-menu.png")).unwrap();
     }
 }

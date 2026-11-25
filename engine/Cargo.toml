@@ -1,7 +1,7 @@
 [package]
 name = "backup-engine"
 version = "0.1.0"
-description = "The backup engine shared by the native and the Tauri window of Lightroom Backup Station."
+description = "The backup engine of DataHaven."
 edition = "2024"
 rust-version = "1.90"
 publish = false
@@ -20,6 +20,9 @@ blake3 = { version = "1.8.7", features = ["mmap", "rayon"] }
 globset = "0.4.20"
 xattr = "1.6.1"
 libc = "0.2.190"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 mtp-rs = { version = "0.33", features = ["virtual-device"] }

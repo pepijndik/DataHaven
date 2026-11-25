@@ -29,7 +29,8 @@ pub struct VolumeHealth {
 }
 
 /// Drives and network shares the user can back up to: everything mounted under `/Volumes` on macOS,
-/// or under `/media`, `/run/media` and `/mnt` on Linux. The startup disk is left out.
+/// under `/media`, `/run/media` and `/mnt` on Linux, and every drive letter except the system drive
+/// on Windows. The startup disk is left out.
 pub fn detect() -> Vec<MountedVolume> {
     let mut volumes: Vec<MountedVolume> = mount_points().into_iter().filter_map(|(path, filesystem)| volume_at(&path, filesystem)).collect();
     volumes.sort_by_key(|volume| volume.name.to_lowercase());
@@ -47,7 +48,7 @@ fn mount_points() -> Vec<(std::path::PathBuf, Option<String>)> {
         .collect()
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 fn mount_points() -> Vec<(std::path::PathBuf, Option<String>)> {
     let Ok(mounts) = fs::read_to_string("/proc/self/mounts") else { return Vec::new() };
     mounts
@@ -76,6 +77,10 @@ fn volume_at(path: &Path, _filesystem: Option<String>) -> Option<MountedVolume> 
     if Path::new(&mounted_on) != path {
         return None;
     }
+    // System volumes such as Recovery are mounted "nobrowse": Finder and Disk Utility hide them, so we do too.
+    if hidden_by_system(stats.f_flags) {
+        return None;
+    }
     let filesystem = unsafe { std::ffi::CStr::from_ptr(stats.f_fstypename.as_ptr()) }.to_string_lossy().into_owned();
     let block = u64::from(stats.f_bsize);
     Some(MountedVolume {
@@ -87,7 +92,16 @@ fn volume_at(path: &Path, _filesystem: Option<String>) -> Option<MountedVolume> 
     })
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The `MNT_DONTBROWSE` mount flag, set on system volumes (Recovery, Preboot, VM, Update) that macOS hides.
+#[cfg(target_os = "macos")]
+const MNT_DONTBROWSE: u32 = 0x0010_0000;
+
+#[cfg(target_os = "macos")]
+fn hidden_by_system(flags: u32) -> bool {
+    flags & MNT_DONTBROWSE != 0
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
 fn volume_at(path: &Path, filesystem: Option<String>) -> Option<MountedVolume> {
     let c_path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
     let mut stats: libc::statvfs = unsafe { std::mem::zeroed() };
@@ -103,6 +117,104 @@ fn volume_at(path: &Path, filesystem: Option<String>) -> Option<MountedVolume> {
         capacity: Some(stats.f_blocks as u64 * block),
         available: Some(stats.f_bavail as u64 * block),
     })
+}
+
+/// The system drive (`C:`), which plays the part of the startup disk on Windows.
+#[cfg(windows)]
+fn system_drive() -> String {
+    std::env::var("SystemDrive").unwrap_or_else(|_| "C:".to_string()).to_uppercase()
+}
+
+#[cfg(windows)]
+fn mount_points() -> Vec<(std::path::PathBuf, Option<String>)> {
+    // SAFETY: GetLogicalDrives takes no arguments and returns a bit per drive letter.
+    let mask = unsafe { windows_sys::Win32::Storage::FileSystem::GetLogicalDrives() };
+    let system = system_drive();
+    (0..26u8)
+        .filter(|bit| mask & (1 << bit) != 0)
+        .map(|bit| format!("{}:", (b'A' + bit) as char))
+        .filter(|letter| *letter != system && letter.as_str() != "A:" && letter.as_str() != "B:")
+        .map(|letter| (std::path::PathBuf::from(format!("{letter}\\")), None))
+        .collect()
+}
+
+#[cfg(windows)]
+fn volume_at(path: &Path, _filesystem: Option<String>) -> Option<MountedVolume> {
+    use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeInformationW};
+    const DRIVE_REMOVABLE: u32 = 2;
+    const DRIVE_FIXED: u32 = 3;
+    const DRIVE_REMOTE: u32 = 4;
+    let wide: Vec<u16> = path.as_os_str().to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: `wide` is a NUL terminated UTF-16 path that outlives every call below.
+    let kind = unsafe { GetDriveTypeW(wide.as_ptr()) };
+    if !matches!(kind, DRIVE_REMOVABLE | DRIVE_FIXED | DRIVE_REMOTE) {
+        return None; // CD drives, RAM disks and unknown devices
+    }
+    let mut label = [0u16; 261];
+    let mut filesystem = [0u16; 261];
+    // SAFETY: both buffers are writable and their sizes are passed along. Fails for an empty card reader.
+    let ok = unsafe { GetVolumeInformationW(wide.as_ptr(), label.as_mut_ptr(), label.len() as u32, std::ptr::null_mut(), std::ptr::null_mut(), std::ptr::null_mut(), filesystem.as_mut_ptr(), filesystem.len() as u32) };
+    if ok == 0 {
+        return None;
+    }
+    let text = |buffer: &[u16]| String::from_utf16_lossy(&buffer[..buffer.iter().position(|&unit| unit == 0).unwrap_or(buffer.len())]);
+    let letter = path.to_string_lossy().trim_end_matches('\\').to_string();
+    let label = text(&label);
+    let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: the output pointers are valid u64s; the last one may be null.
+    let sized = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, &mut total, std::ptr::null_mut()) } != 0;
+    Some(MountedVolume {
+        name: if label.is_empty() { format!("Drive {letter}") } else { format!("{label} ({letter})") },
+        path: path.to_string_lossy().into_owned(),
+        filesystem: text(&filesystem).to_lowercase(),
+        capacity: sized.then_some(total),
+        available: sized.then_some(free),
+    })
+}
+
+/// Paths compared the way the system does: either slash, and without case on Windows.
+fn normalized(path: &str) -> String {
+    let path = path.replace('\\', "/");
+    let path = path.trim_end_matches('/');
+    if cfg!(windows) { path.to_lowercase() } else { path.to_string() }
+}
+
+/// Whether `path` is the volume at `volume_path` or inside it.
+pub fn volume_contains(volume_path: &str, path: &str) -> bool {
+    if volume_path.is_empty() || path.is_empty() {
+        return false;
+    }
+    let volume = normalized(volume_path);
+    let path = normalized(path);
+    path == volume || path.starts_with(&format!("{volume}/"))
+}
+
+/// The name of the external drive (or network share) a path is on, connected or not.
+/// `None` for paths on this computer's own disk.
+pub fn external_drive_name(path: &str) -> Option<String> {
+    if cfg!(windows) {
+        let bytes = path.as_bytes();
+        if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+            let letter = path[..2].to_uppercase();
+            #[cfg(windows)]
+            if letter == system_drive() {
+                return None;
+            }
+            return Some(format!("Drive {letter}"));
+        }
+        return path.starts_with("\\\\").then(|| path.trim_start_matches('\\').split('\\').next().unwrap_or("Network").to_string());
+    }
+    let parts: Vec<&str> = path.split('/').filter(|part| !part.is_empty()).collect();
+    match parts.as_slice() {
+        ["Volumes", name, ..] => Some((*name).to_string()),
+        ["media", _, name, ..] | ["run", "media", _, name, ..] | ["mnt", name, ..] => Some((*name).to_string()),
+        _ => None,
+    }
+}
+
+/// The last part of a path, with either kind of slash.
+pub fn last_component(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path)
 }
 
 pub fn health(path: String, level: String) -> VolumeHealth {
@@ -260,6 +372,12 @@ mod tests {
             .unwrap()
             .flatten()
             .filter(|entry| entry.file_type().unwrap().is_dir() && !entry.file_name().to_string_lossy().starts_with('.'))
+            .filter(|entry| {
+                // Hidden system volumes (Recovery and the like) are left out, as in Finder.
+                let c_path = std::ffi::CString::new(entry.path().as_os_str().as_encoded_bytes()).unwrap();
+                let mut stats: libc::statfs = unsafe { std::mem::zeroed() };
+                (unsafe { libc::statfs(c_path.as_ptr(), &mut stats) } == 0) && !hidden_by_system(stats.f_flags)
+            })
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(detected.len(), expected.len(), "{detected:?}");
@@ -290,5 +408,41 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&root);
         assert!(created.unwrap().ends_with(&name));
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod hidden_volume_tests {
+    use super::*;
+
+    #[test]
+    fn hidden_system_volumes_are_skipped() {
+        // Flags of /Volumes/Recovery (local, journaled, nobrowse) and of a plugged in drive.
+        assert!(hidden_by_system(0x0010_0000 | 0x0000_1000 | 0x0080_0000));
+        assert!(!hidden_by_system(0x0000_1000 | 0x0000_0008));
+        let names: Vec<String> = detect().into_iter().map(|volume| volume.name).collect();
+        assert!(!names.iter().any(|name| name == "Recovery" || name == "Preboot"), "{names:?}");
+    }
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::*;
+
+    #[test]
+    fn paths_on_drives() {
+        assert!(volume_contains("/Volumes/T7", "/Volumes/T7/Photos"));
+        assert!(volume_contains("/Volumes/T7", "/Volumes/T7"));
+        assert!(!volume_contains("/Volumes/T7", "/Volumes/T7 Shield"));
+        assert_eq!(last_component("/Users/me/Pictures/"), "Pictures");
+        assert_eq!(last_component("D:\\Photos\\2025"), "2025");
+        if cfg!(windows) {
+            assert!(volume_contains("D:\\", "d:\\Photos"));
+            assert_eq!(external_drive_name("E:\\Backup").as_deref(), Some("Drive E:"));
+        } else {
+            assert_eq!(external_drive_name("/Volumes/T7 Shield/Lightroom").as_deref(), Some("T7 Shield"));
+            assert_eq!(external_drive_name("/Users/me/Pictures"), None);
+            assert_eq!(external_drive_name("/run/media/me/Card/DCIM").as_deref(), Some("Card"));
+        }
     }
 }
