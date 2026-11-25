@@ -1,21 +1,33 @@
-//! Backup jobs as the window edits them. The JSON shape matches `profiles.json`, which the Tauri
-//! window reads and writes too, so both windows share the same jobs. Unknown fields are kept.
+//! Backup jobs as the window edits them. The JSON shape matches `profiles.json`, which earlier versions
+//! (the Tauri window) wrote, so existing jobs carry over. Unknown fields are kept.
 
 use backup_engine::profile::{BackupProfile, ProfileStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
-/// Same identifier as the Tauri app, so jobs, history and phone settings are shared.
+/// Same identifier as the earlier Tauri app, so existing jobs, history and phone settings carry over.
 pub const APP_IDENTIFIER: &str = "com.lightroombackup.station";
 
-/// The app data folder, the same one Tauri uses (`~/Library/Application Support/<id>` on macOS).
+/// The app data folder, the same one the earlier Tauri app used (`~/Library/Application Support/<id>` on macOS,
+/// `%APPDATA%\\<id>` on Windows).
 pub fn data_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    if cfg!(target_os = "macos") {
-        return home.join("Library/Application Support").join(APP_IDENTIFIER);
+    if cfg!(windows) {
+        let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        return base.join(APP_IDENTIFIER);
     }
-    let base = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).filter(|path| path.is_absolute()).unwrap_or_else(|| home.join(".local/share"));
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    if cfg!(target_os = "macos") {
+        return home
+            .join("Library/Application Support")
+            .join(APP_IDENTIFIER);
+    }
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.join(".local/share"));
     base.join(APP_IDENTIFIER)
 }
 
@@ -88,7 +100,15 @@ fn ssh_port() -> u16 {
 
 impl Default for Qnap {
     fn default() -> Self {
-        Self { host: String::new(), share: "Backups".to_string(), username: String::new(), remote_root: "/share/Backups".to_string(), ssh_port: 22, use_helper: true, extra: Map::new() }
+        Self {
+            host: String::new(),
+            share: "Backups".to_string(),
+            username: String::new(),
+            remote_root: "/share/Backups".to_string(),
+            ssh_port: 22,
+            use_helper: true,
+            extra: Map::new(),
+        }
     }
 }
 
@@ -174,20 +194,27 @@ impl Job {
     /// The engine's typed view of this job.
     pub fn engine_profile(&self) -> Result<BackupProfile, String> {
         let value = serde_json::to_value(self).map_err(|error| error.to_string())?;
-        serde_json::from_value(value).map_err(|error| format!("This job has an invalid setting: {error}"))
+        serde_json::from_value(value)
+            .map_err(|error| format!("This job has an invalid setting: {error}"))
     }
 
     /// A key that changes whenever anything that affects a backup changes.
     pub fn fingerprint(&self) -> String {
-        self.engine_profile().ok().and_then(|profile| serde_json::to_string(&profile).ok()).unwrap_or_default()
+        self.engine_profile()
+            .ok()
+            .and_then(|profile| serde_json::to_string(&profile).ok())
+            .unwrap_or_default()
     }
 
     pub fn is_configured(&self) -> bool {
-        !self.destination_root.is_empty() && self.sources.iter().any(|source| !source.path.is_empty())
+        !self.destination_root.is_empty()
+            && self.sources.iter().any(|source| !source.path.is_empty())
     }
 
     pub fn guard(&self, guard: &str) -> bool {
-        self.guards.as_ref().is_some_and(|guards| guards.iter().any(|value| value == guard))
+        self.guards
+            .as_ref()
+            .is_some_and(|guards| guards.iter().any(|value| value == guard))
     }
 
     pub fn set_guard(&mut self, guard: &str, on: bool) {
@@ -218,26 +245,42 @@ pub fn load_jobs(directory: &Path) -> Result<Vec<Job>, String> {
     ProfileStore::new(directory)
         .load(directory)?
         .into_iter()
-        .map(|value| serde_json::from_value::<Job>(value).map_err(|error| format!("profiles.json has an invalid job: {error}")))
+        .map(|value| {
+            serde_json::from_value::<Job>(value)
+                .map_err(|error| format!("profiles.json has an invalid job: {error}"))
+        })
         .collect()
 }
 
 pub fn save_jobs(directory: &Path, jobs: &[Job]) -> Result<(), String> {
-    let values = jobs.iter().map(serde_json::to_value).collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let values = jobs
+        .iter()
+        .map(serde_json::to_value)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     ProfileStore::new(directory).save(&values)
 }
 
 pub fn presets(directory: &Path) -> Vec<Job> {
-    backup_engine::profile::presets(directory).into_iter().filter_map(|value| serde_json::from_value(value).ok()).collect()
+    backup_engine::profile::presets(directory)
+        .into_iter()
+        .filter_map(|value| serde_json::from_value(value).ok())
+        .collect()
 }
 
 pub fn unix_now() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_secs()).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
 }
 
 /// A short unique id for new jobs and runs.
 pub fn new_id(prefix: &str) -> String {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|elapsed| elapsed.as_nanos()).unwrap_or(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos())
+        .unwrap_or(0);
     format!("{prefix}-{}", nanos / 1_000_000)
 }
 
@@ -269,8 +312,14 @@ mod tests {
 
     #[test]
     fn unique_source_ids() {
-        let mut job = Job { id: "j".into(), ..Default::default() };
-        job.sources.push(Source { id: "source".into(), ..Default::default() });
+        let mut job = Job {
+            id: "j".into(),
+            ..Default::default()
+        };
+        job.sources.push(Source {
+            id: "source".into(),
+            ..Default::default()
+        });
         assert_eq!(job.unique_source_id("source"), "source-2");
         assert_eq!(job.unique_source_id("camera"), "camera");
     }

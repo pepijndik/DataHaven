@@ -1,16 +1,32 @@
 //! The "Send to phone" panel: one click sends a folder of photos to an album on an Android phone.
 
-use crate::app::{pick_folder, App, Event};
+use crate::app::{App, Event, pick_folder};
 use crate::style::{self, format_bytes, muted};
-use backup_engine::android::{self, AndroidAlbum, AndroidProgress, AndroidSendResult, AndroidStorage, PhoneSettings, SendRequest};
+use backup_engine::android::{
+    self, AndroidAlbum, AndroidProgress, AndroidSendResult, AndroidStorage, PhoneSettings,
+    SendRequest,
+};
 use backup_engine::runtime;
 use eframe::egui::{self, RichText};
 
 pub enum PhoneEvent {
-    Loaded { device_id: String, settings: Option<PhoneSettings>, name: Option<Option<String>>, storages: Result<Vec<AndroidStorage>, String>, albums: Result<Vec<AndroidAlbum>, String> },
-    Albums { device_id: String, albums: Vec<AndroidAlbum> },
+    Loaded {
+        device_id: String,
+        settings: Option<PhoneSettings>,
+        name: Option<Option<String>>,
+        storages: Result<Vec<AndroidStorage>, String>,
+        albums: Result<Vec<AndroidAlbum>, String>,
+    },
+    Albums {
+        device_id: String,
+        albums: Vec<AndroidAlbum>,
+    },
     Progress(AndroidProgress),
-    Sent { device_id: String, dry_run: bool, result: Result<AndroidSendResult, String> },
+    Sent {
+        device_id: String,
+        dry_run: bool,
+        result: Result<AndroidSendResult, String>,
+    },
     Error(String),
 }
 
@@ -40,19 +56,39 @@ pub fn send_summary(result: &AndroidSendResult) -> String {
     let plural = |count: u32| if count == 1 { "" } else { "s" };
     if result.dry_run {
         return if result.sent == 0 {
-            format!("Nothing new. {} file{} already on the phone.", result.skipped, if result.skipped == 1 { " is" } else { "s are" })
+            format!(
+                "Nothing new. {} file{} already on the phone.",
+                result.skipped,
+                if result.skipped == 1 { " is" } else { "s are" }
+            )
         } else {
-            format!("{} new file{} to send ({}), {} already on the phone.", result.sent, plural(result.sent), format_bytes(result.bytes), result.skipped)
+            format!(
+                "{} new file{} to send ({}), {} already on the phone.",
+                result.sent,
+                plural(result.sent),
+                format_bytes(result.bytes),
+                result.skipped
+            )
         };
     }
-    let mut parts = vec![format!("{} sent ({})", result.sent, format_bytes(result.bytes)), format!("{} already on the phone", result.skipped)];
+    let mut parts = vec![
+        format!("{} sent ({})", result.sent, format_bytes(result.bytes)),
+        format!("{} already on the phone", result.skipped),
+    ];
     if result.failed > 0 {
         parts.push(format!("{} failed", result.failed));
     }
     if result.conflicts > 0 {
-        parts.push(format!("{} skipped because of a name clash", result.conflicts));
+        parts.push(format!(
+            "{} skipped because of a name clash",
+            result.conflicts
+        ));
     }
-    format!("{}{}.", if result.cancelled { "Stopped. " } else { "" }, parts.join(", "))
+    format!(
+        "{}{}.",
+        if result.cancelled { "Stopped. " } else { "" },
+        parts.join(", ")
+    )
 }
 
 /// Every call opens the USB connection, so phone work runs one call after the other on one thread.
@@ -60,18 +96,37 @@ fn load(app: &App, device_id: String, first_time: bool, storage_id: Option<u64>)
     let directory = app.data_dir.clone();
     app.spawn(move || {
         let settings = first_time.then(|| android::load_settings(&directory, &device_id));
-        let storage = settings.as_ref().map(|settings| settings.storage_id).unwrap_or(storage_id);
-        let name = if first_time { Some(runtime::block_on(android::display_name(&device_id))) } else { None };
+        let storage = settings
+            .as_ref()
+            .map(|settings| settings.storage_id)
+            .unwrap_or(storage_id);
+        let name = if first_time {
+            Some(runtime::block_on(android::display_name(&device_id)))
+        } else {
+            None
+        };
         let storages = runtime::block_on(android::list_storages(&device_id));
         let albums = runtime::block_on(android::list_albums(&device_id, storage));
-        Event::Phone(PhoneEvent::Loaded { device_id, settings, name, storages, albums })
+        Event::Phone(PhoneEvent::Loaded {
+            device_id,
+            settings,
+            name,
+            storages,
+            albums,
+        })
     });
 }
 
 pub fn handle(app: &mut App, event: PhoneEvent) {
     let panel = &mut app.phone;
     match event {
-        PhoneEvent::Loaded { device_id, settings, name, storages, albums } => {
+        PhoneEvent::Loaded {
+            device_id,
+            settings,
+            name,
+            storages,
+            albums,
+        } => {
             if panel.device_id.as_deref() != Some(device_id.as_str()) {
                 return;
             }
@@ -100,7 +155,11 @@ pub fn handle(app: &mut App, event: PhoneEvent) {
             }
         }
         PhoneEvent::Progress(progress) => panel.progress = Some(progress),
-        PhoneEvent::Sent { device_id, dry_run, result } => {
+        PhoneEvent::Sent {
+            device_id,
+            dry_run,
+            result,
+        } => {
             panel.sending = false;
             panel.checking = false;
             panel.progress = None;
@@ -109,7 +168,11 @@ pub fn handle(app: &mut App, event: PhoneEvent) {
                     app.message = send_summary(&result);
                     panel.result = Some(result);
                     if !dry_run {
-                        let _ = android::save_settings(&app.data_dir, &device_id, panel.settings.clone());
+                        let _ = android::save_settings(
+                            &app.data_dir,
+                            &device_id,
+                            panel.settings.clone(),
+                        );
                         let storage = panel.settings.storage_id;
                         load(app, device_id, false, storage);
                     }
@@ -129,7 +192,11 @@ pub fn handle(app: &mut App, event: PhoneEvent) {
 
 /// Keeps the panel on a connected phone and loads it when the phone changes.
 fn follow_devices(app: &mut App) {
-    let connected = app.phone.device_id.as_ref().is_some_and(|id| app.phones.iter().any(|device| &device.id == id));
+    let connected = app
+        .phone
+        .device_id
+        .as_ref()
+        .is_some_and(|id| app.phones.iter().any(|device| &device.id == id));
     if connected {
         return;
     }
@@ -138,7 +205,10 @@ fn follow_devices(app: &mut App) {
 }
 
 fn select_device(app: &mut App, device_id: Option<String>) {
-    app.phone = PhonePanel { device_id: device_id.clone(), ..PhonePanel::default() };
+    app.phone = PhonePanel {
+        device_id: device_id.clone(),
+        ..PhonePanel::default()
+    };
     if let Some(id) = device_id {
         load(app, id, true, None);
     }
@@ -155,11 +225,26 @@ fn remember(app: &mut App, settings: PhoneSettings) {
 }
 
 fn send(app: &mut App, dry_run: bool) {
-    let (Some(device_id), Some(source)) = (app.phone.device_id.clone(), app.phone.settings.source.clone()) else { return };
-    if dry_run { app.phone.checking = true } else { app.phone.sending = true }
+    let (Some(device_id), Some(source)) = (
+        app.phone.device_id.clone(),
+        app.phone.settings.source.clone(),
+    ) else {
+        return;
+    };
+    if dry_run {
+        app.phone.checking = true
+    } else {
+        app.phone.sending = true
+    }
     app.phone.result = None;
     app.phone.error = None;
-    let request = SendRequest { device_id: device_id.clone(), storage_id: app.phone.settings.storage_id, source, album: app.phone.settings.album.clone(), dry_run };
+    let request = SendRequest {
+        device_id: device_id.clone(),
+        storage_id: app.phone.settings.storage_id,
+        source,
+        album: app.phone.settings.album.clone(),
+        dry_run,
+    };
     let directory = app.data_dir.clone();
     let sender = app.sender.clone();
     let ctx = app.ctx.clone();
@@ -169,13 +254,19 @@ fn send(app: &mut App, dry_run: bool) {
             ctx.request_repaint();
         };
         let result = runtime::block_on(android::send(request, &directory, on_progress));
-        Event::Phone(PhoneEvent::Sent { device_id, dry_run, result })
+        Event::Phone(PhoneEvent::Sent {
+            device_id,
+            dry_run,
+            result,
+        })
     });
 }
 
 fn save_album(app: &mut App, mode: AlbumMode, value: String) {
     let name = value.trim().to_string();
-    let Some(device_id) = app.phone.device_id.clone() else { return };
+    let Some(device_id) = app.phone.device_id.clone() else {
+        return;
+    };
     if name.is_empty() {
         return;
     }
@@ -188,7 +279,9 @@ fn save_album(app: &mut App, mode: AlbumMode, value: String) {
         let changed = match mode {
             AlbumMode::New => runtime::block_on(android::create_album(&device_id, storage, &name)),
             AlbumMode::Rename => match current {
-                Some(old) if old != name => runtime::block_on(android::rename_album(&device_id, storage, &old, &name)),
+                Some(old) if old != name => {
+                    runtime::block_on(android::rename_album(&device_id, storage, &old, &name))
+                }
                 _ => Ok(()),
             },
         };
@@ -208,6 +301,9 @@ pub fn panel(app: &mut App, ui: &mut egui::Ui) {
             ui.label(style::title("No phone connected"));
             ui.add_space(6.0);
             ui.label(muted("Plug in your Android phone, unlock it and choose \"File transfer\" in the USB notification."));
+            if ui.add(style::text_button("Using an iPhone? Send through the Photos app instead")).clicked() {
+                app.phone_tab = crate::app::PhoneTab::Iphone;
+            }
             return;
         };
 
@@ -304,24 +400,48 @@ fn setup(app: &mut App, ui: &mut egui::Ui) {
                 picked = Some(Some(volume.path.clone()));
             }
         }
-        if ui.add(style::ghost_button(if cfg!(target_os = "macos") { "This Mac" } else { "This computer" })).clicked() {
+        if ui
+            .add(style::ghost_button(if cfg!(target_os = "macos") {
+                "This Mac"
+            } else {
+                "This computer"
+            }))
+            .clicked()
+        {
             picked = Some(None);
         }
     });
     if let Some(start) = picked {
         let start = start.or_else(|| app.phone.settings.source.clone());
         if let Some(folder) = pick_folder(start.as_deref()) {
-            let settings = PhoneSettings { source: Some(folder), ..app.phone.settings.clone() };
+            let settings = PhoneSettings {
+                source: Some(folder),
+                ..app.phone.settings.clone()
+            };
             remember(app, settings);
         }
     }
     if let Some(source) = &app.phone.settings.source {
-        ui.label(RichText::new(source).size(11.0).monospace().color(style::MUTED));
+        ui.label(
+            RichText::new(source)
+                .size(11.0)
+                .monospace()
+                .color(style::MUTED),
+        );
     }
 
-    ui.label(muted(format!("2. Which album on the phone? ({})", android::ROOT_FOLDER)));
+    ui.label(muted(format!(
+        "2. Which album on the phone? ({})",
+        android::ROOT_FOLDER
+    )));
     if let Some((mode, mut text)) = app.phone.album_input.clone() {
-        let response = ui.add(egui::TextEdit::singleline(&mut text).hint_text(if mode == AlbumMode::New { "New album name" } else { "Album name" }));
+        let response = ui.add(egui::TextEdit::singleline(&mut text).hint_text(
+            if mode == AlbumMode::New {
+                "New album name"
+            } else {
+                "Album name"
+            },
+        ));
         response.request_focus();
         let enter = ui.input(|input| input.key_pressed(egui::Key::Enter));
         let escape = ui.input(|input| input.key_pressed(egui::Key::Escape));
@@ -335,53 +455,112 @@ fn setup(app: &mut App, ui: &mut egui::Ui) {
         }
     } else {
         let mut album = app.phone.settings.album.clone().unwrap_or_default();
-        let mut options: Vec<(String, String)> = app.phone.albums.iter().map(|item| (item.name.clone(), format!("{} ({})", item.name, item.files))).collect();
-        if !album.is_empty() && !options.iter().any(|(name, _)| name.eq_ignore_ascii_case(&album)) {
+        let mut options: Vec<(String, String)> = app
+            .phone
+            .albums
+            .iter()
+            .map(|item| (item.name.clone(), format!("{} ({})", item.name, item.files)))
+            .collect();
+        if !album.is_empty()
+            && !options
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(&album))
+        {
             options.push((album.clone(), format!("{album} (0)")));
         }
         ui.horizontal_wrapped(|ui| {
-            let selected = if album.is_empty() { "Fotografie (no album)".to_string() } else { album.clone() };
-            egui::ComboBox::from_id_salt("phone-album").selected_text(selected).show_ui(ui, |ui| {
-                ui.selectable_value(&mut album, String::new(), "Fotografie (no album)");
-                for (name, label) in &options {
-                    ui.selectable_value(&mut album, name.clone(), label);
-                }
-            });
+            let selected = if album.is_empty() {
+                "Fotografie (no album)".to_string()
+            } else {
+                album.clone()
+            };
+            egui::ComboBox::from_id_salt("phone-album")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut album, String::new(), "Fotografie (no album)");
+                    for (name, label) in &options {
+                        ui.selectable_value(&mut album, name.clone(), label);
+                    }
+                });
             if ui.add(style::ghost_button("New album")).clicked() {
                 app.phone.album_input = Some((AlbumMode::New, String::new()));
             }
-            if app.phone.settings.album.as_deref().is_some_and(|album| !album.is_empty()) && ui.add(style::ghost_button("Rename")).clicked() {
-                app.phone.album_input = Some((AlbumMode::Rename, app.phone.settings.album.clone().unwrap_or_default()));
+            if app
+                .phone
+                .settings
+                .album
+                .as_deref()
+                .is_some_and(|album| !album.is_empty())
+                && ui.add(style::ghost_button("Rename")).clicked()
+            {
+                app.phone.album_input = Some((
+                    AlbumMode::Rename,
+                    app.phone.settings.album.clone().unwrap_or_default(),
+                ));
             }
         });
         let current = app.phone.settings.album.clone().unwrap_or_default();
         if album != current {
-            let settings = PhoneSettings { album: (!album.is_empty()).then_some(album), ..app.phone.settings.clone() };
+            let settings = PhoneSettings {
+                album: (!album.is_empty()).then_some(album),
+                ..app.phone.settings.clone()
+            };
             remember(app, settings);
         }
     }
 
-    let writable: Vec<AndroidStorage> = app.phone.storages.iter().filter(|storage| storage.writable).cloned().collect();
+    let writable: Vec<AndroidStorage> = app
+        .phone
+        .storages
+        .iter()
+        .filter(|storage| storage.writable)
+        .cloned()
+        .collect();
     if writable.len() > 1 {
         ui.label(muted("3. Phone storage"));
         let current = app.phone.settings.storage_id.unwrap_or(writable[0].id);
         let mut chosen = current;
-        let label = |storage: &AndroidStorage| format!("{} ({} free)", if storage.description.is_empty() { "Storage" } else { &storage.description }, format_bytes(storage.free));
-        let selected = writable.iter().find(|storage| storage.id == current).map(label).unwrap_or_default();
-        egui::ComboBox::from_id_salt("phone-storage").selected_text(selected).show_ui(ui, |ui| {
-            for storage in &writable {
-                ui.selectable_value(&mut chosen, storage.id, label(storage));
-            }
-        });
+        let label = |storage: &AndroidStorage| {
+            format!(
+                "{} ({} free)",
+                if storage.description.is_empty() {
+                    "Storage"
+                } else {
+                    &storage.description
+                },
+                format_bytes(storage.free)
+            )
+        };
+        let selected = writable
+            .iter()
+            .find(|storage| storage.id == current)
+            .map(label)
+            .unwrap_or_default();
+        egui::ComboBox::from_id_salt("phone-storage")
+            .selected_text(selected)
+            .show_ui(ui, |ui| {
+                for storage in &writable {
+                    ui.selectable_value(&mut chosen, storage.id, label(storage));
+                }
+            });
         if chosen != current {
-            let settings = PhoneSettings { storage_id: Some(chosen), ..app.phone.settings.clone() };
+            let settings = PhoneSettings {
+                storage_id: Some(chosen),
+                ..app.phone.settings.clone()
+            };
             remember(app, settings);
             if let Some(id) = app.phone.device_id.clone() {
                 load(app, id, false, Some(chosen));
             }
         }
     }
-    if ui.add_enabled(app.phone.settings.source.is_some(), style::primary_button("Done")).clicked() {
+    if ui
+        .add_enabled(
+            app.phone.settings.source.is_some(),
+            style::primary_button("Done"),
+        )
+        .clicked()
+    {
         app.phone.setup = false;
     }
 }

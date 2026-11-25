@@ -1,6 +1,5 @@
 //! The backup engine of Lightroom Backup Station: scanning, planning, copying, verification,
-//! phones, NAS and volume tools. It has no window code, so the native egui window and the
-//! Tauri window share exactly the same engine.
+//! phones, NAS and volume tools. It has no window code; the egui window in `native/` uses it.
 
 pub mod android;
 pub mod backup;

@@ -16,7 +16,7 @@ app="$bundle_dir/DataHaven.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp target/release/backup-station "$app/Contents/MacOS/backup-station"
-cp src-tauri/icons/icon.icns "$app/Contents/Resources/icon.icns"
+cp native/assets/icon.icns "$app/Contents/Resources/icon.icns"
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' native/Cargo.toml | head -1)
 
 cat > "$app/Contents/Info.plist" <<PLIST
